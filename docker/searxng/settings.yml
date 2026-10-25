@@ -1,0 +1,22 @@
+# Мінімальний конфіг SearXNG для DaaS Studio.
+# JSON API потрібен для domain_resolver (пошук офіційного сайту).
+use_default_settings: true
+
+general:
+  instance_name: "daas-searxng"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  # Саме це вмикає /search?format=json
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "change-me-before-exposing"
+  limiter: false
+  image_proxy: false
+
+ui:
+  static_use_hash: true
