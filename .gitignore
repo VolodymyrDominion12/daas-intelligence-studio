@@ -1,1 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.npm-cache/
+*.tsbuildinfo
+
+# Dev tooling / local caches (never commit)
+.dev/
+backend/.uv-cache/
+backend/.uv-python/
+backend/.fresh-test/
+coverage.xml
+
+# Local runtime data (never commit scraped data / secrets)
+storage/
+.env
+.env.local
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+logs/
+
+# IDE
 .idea/
+.vscode/
+.DS_Store

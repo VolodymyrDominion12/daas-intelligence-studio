@@ -1,0 +1,53 @@
+# Опційна інфраструктура для локального запуску.
+# Сама студія працює як звичайний Python-процес: `uv run daas serve`.
+#
+#   docker compose up -d
+#   # Ollama:   http://127.0.0.1:11434/v1
+#   # SearXNG:  http://127.0.0.1:8080  (JSON API увімкнено в docker/searxng/settings.yml)
+#
+# Потім у .env:
+#   DAAS_LLM_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
+#   DAAS_SEARXNG_URL=http://127.0.0.1:8080
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: daas-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # GPU (опційно): розкоментуйте для NVIDIA
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: daas-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/
+      - SEARXNG_SECRET=change-me-before-exposing
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  ollama-data:
