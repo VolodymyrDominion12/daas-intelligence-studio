@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS quarantine (
 
 # A tombstone is a regular version row with ``deleted = TRUE``: history stays append-only, and
 # the record disappears from the current view, snapshots and diffs (→ ``removed_entity``).
+SNAPSHOT_STATE_SQL = """
+SELECT * EXCLUDE (rn) FROM (
+    SELECT *, row_number() OVER (PARTITION BY record_key ORDER BY revision DESC) AS rn
+    FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
+) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
+"""
+
 CURRENT_VIEW = """
 CREATE OR REPLACE VIEW current_records AS
 SELECT dataset_id, record_key, dataset_version, revision, payload, provenance, source_url,
@@ -70,6 +77,12 @@ WHERE rn = 1 AND NOT COALESCE(deleted, FALSE);
 
 NUMERIC_DTYPES = {"number", "integer"}
 _JSON_PATH = "$.\"{key}\""
+# Every JSON path is passed as a bound parameter, never spliced into SQL text.
+_JSON_FIELD = "json_extract_string(payload, ?)"
+
+
+def _json_path(key: str) -> str:
+    return _JSON_PATH.format(key=_safe_key(key))
 
 
 class AnalyticsStore:
@@ -296,14 +309,16 @@ class AnalyticsStore:
         for key, value in (filters or {}).items():
             if value in (None, ""):
                 continue
-            where.append(f"json_extract_string(payload, '{_JSON_PATH.format(key=_safe_key(key))}') ILIKE ?")
-            params.append(f"%{value}%")
+            where.append(f"{_JSON_FIELD} ILIKE ?")
+            params.extend([_json_path(key), f"%{value}%"])
         where_sql = " AND ".join(where)
 
         order_sql = "record_key"
+        order_params: list[Any] = []
         if sort and _safe_key(sort) in type_map:
             key = _safe_key(sort)
-            expression = f"json_extract_string(payload, '{_JSON_PATH.format(key=key)}')"
+            expression = _JSON_FIELD
+            order_params.append(_json_path(key))
             if type_map.get(key) in NUMERIC_DTYPES:
                 order_sql = f"TRY_CAST({expression} AS DOUBLE)"
             elif type_map.get(key) == "datetime":
@@ -320,7 +335,7 @@ class AnalyticsStore:
             rows = self._con.execute(
                 f"SELECT record_key, payload, provenance, source_url, observed_at "
                 f"FROM current_records WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
-                [*params, limit, offset],
+                [*params, *order_params, limit, offset],
             ).fetchall()
         items = [self._row_to_item(row) for row in rows]
         return {"items": items, "total": int(total), "limit": limit, "offset": offset}
@@ -368,14 +383,12 @@ class AnalyticsStore:
         if not columns:
             return {}
         selects = ", ".join(
-            f"AVG(CASE WHEN json_extract_string(payload, '{_JSON_PATH.format(key=_safe_key(c.key))}')"
-            f" IS NOT NULL THEN 1.0 ELSE 0.0 END) AS \"{_safe_key(c.key)}\""
-            for c in columns
+            f"AVG(CASE WHEN {_JSON_FIELD} IS NOT NULL THEN 1.0 ELSE 0.0 END)" for _ in columns
         )
         with self._lock:
             row = self._con.execute(
                 f"SELECT {selects}, COUNT(*) AS total FROM current_records WHERE dataset_id = ?",
-                [dataset_id],
+                [*[_json_path(c.key) for c in columns], dataset_id],
             ).fetchone()
         total = row[-1] if row else 0
         if not total:
@@ -398,19 +411,10 @@ class AnalyticsStore:
         tmp = destination.with_suffix(".tmp.parquet")
         # State of the dataset as of ``version``: the latest revision of every record that is
         # not removed. Full history stays in DuckDB (record_versions / record history API).
+        # The file path is handed to DuckDB's relation API as an argument — no SQL text is built.
         with self._lock:
-            self._con.execute(
-                f"""
-                COPY (
-                    SELECT * EXCLUDE (rn) FROM (
-                        SELECT *, row_number() OVER (
-                            PARTITION BY record_key ORDER BY revision DESC
-                        ) AS rn
-                        FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
-                    ) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
-                ) TO '{_escape_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)
-                """,
-                [dataset_id, version],
+            self._con.sql(SNAPSHOT_STATE_SQL, params=[dataset_id, version]).write_parquet(
+                str(tmp), compression="zstd"
             )
         tmp.replace(destination)
         return destination
@@ -523,7 +527,11 @@ class AnalyticsStore:
         fmt: str,
     ) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        names = ["record_key", *[column.key for column in columns], "_source_url", "_observed_at"]
+        names = [
+            _safe_key(name)
+            for name in ["record_key", *[column.key for column in columns], "_source_url",
+                         "_observed_at"]
+        ]
         types = {"number": "DOUBLE", "integer": "BIGINT", "boolean": "BOOLEAN",
                  "datetime": "VARCHAR"}
         definition = ", ".join(
@@ -547,11 +555,11 @@ class AnalyticsStore:
                     self._con.executemany(
                         f"INSERT INTO {temp_table} VALUES ({placeholders})", values
                     )
-                options = "FORMAT PARQUET, COMPRESSION ZSTD" if fmt == "parquet" else "HEADER, DELIMITER ','"
-                self._con.execute(
-                    f"COPY (SELECT * FROM {temp_table}) TO '{_escape_path(destination)}' "
-                    f"({options})"
-                )
+                relation = self._con.table(temp_table)
+                if fmt == "parquet":
+                    relation.write_parquet(str(destination), compression="zstd")
+                else:
+                    relation.write_csv(str(destination), sep=",", header=True)
             finally:
                 self._con.execute(f"DROP TABLE IF EXISTS {temp_table}")
         return destination
@@ -577,10 +585,6 @@ def _safe_key(key: str) -> str:
     if not key.replace("_", "").isalnum():
         raise ValueError(f"unsafe column key: {key!r}")
     return key
-
-
-def _escape_path(path: Path) -> str:
-    return str(path).replace("'", "''")
 
 
 def _dtype_of(name: str, columns: list[FieldSpec]) -> str:
