@@ -76,9 +76,12 @@ class RawCache:
             stat = path.stat()
         except FileNotFoundError:
             return None
-        if max_age_seconds is not None and max_age_seconds >= 0:
-            if time.time() - stat.st_mtime > max_age_seconds:
-                return None
+        if (
+            max_age_seconds is not None
+            and max_age_seconds >= 0
+            and time.time() - stat.st_mtime > max_age_seconds
+        ):
+            return None
         try:
             blob = path.read_bytes()
             with self._lock:
