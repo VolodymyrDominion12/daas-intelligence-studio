@@ -57,8 +57,9 @@ class RunContext:
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     # tombstone bookkeeping (collect runs only)
     seen_keys: set[str] = field(default_factory=set)
-    crawled_domains: set[str] = field(default_factory=set)
-    empty_sources: set[str] = field(default_factory=set)
+    # Evidence for removals: pages of *this* run fetched fresh (not from cache) that yielded
+    # records. A record may be judged missing only if all its known sources are in here.
+    checked_sources: set[str] = field(default_factory=set)
     full_crawl: bool = False
 
 
@@ -184,7 +185,7 @@ class PipelineRunner:
 
                 self.store.release_stale_jobs()
                 jobs = self.store.claim_jobs(
-                    ctx.worker, limit=min(6, limit - processed), lease_seconds=240
+                    ctx.worker, run_id=run_id, limit=min(6, limit - processed), lease_seconds=240
                 )
                 if not jobs:
                     counts = self.store.job_counts(run_id)
@@ -215,6 +216,7 @@ class PipelineRunner:
             await self._finish_dataset(ctx, status_override=None)
         except Exception as exc:
             logger.exception("collect failed")
+            self.rollback_removals(run_id)
             self._fail(task_id, run_id, exc)
             raise
 
@@ -244,7 +246,6 @@ class PipelineRunner:
         ctx.stats.pages_fetched += 1
         if page.from_cache:
             ctx.stats.pages_cached += 1
-        ctx.crawled_domains.add(normalize_domain(page.final_url or page.url))
         await self._extract_page(page, job, ctx)
         self.store.complete_job(job["id"], status="done")
 
@@ -312,8 +313,6 @@ class PipelineRunner:
 
         records = self.engine.to_records(outcome, page, spec)
         if not records:
-            # A page that yields nothing may be a broken layout: never tombstone its records.
-            ctx.empty_sources.update({page.url, page.final_url or page.url})
             level = "warning" if not outcome.warnings else "debug"
             self.store.add_event(
                 ctx.task.id, "no_records", f"0 записів: {page.final_url or page.url}",
@@ -323,6 +322,10 @@ class PipelineRunner:
             await self._expand(page, job, ctx, empty=True)
             return
 
+        if not page.from_cache:
+            # Fresh page that yielded records: it really was checked in this run. Pages that
+            # yield nothing (broken layout?) or come from cache never count as evidence.
+            ctx.checked_sources.update({page.url, page.final_url or page.url, job["url"]})
         for record in records:
             ctx.seen_keys.add(record.record_key)
             record = self._merge_with_existing(record, ctx)
@@ -656,16 +659,21 @@ class PipelineRunner:
 
         Conservative by design — a false «removed» is worse than a late one:
 
-        * only after a full crawl: not cancelled, no page/LLM limit, no failed or skipped jobs;
-        * only for domains actually crawled in this run;
-        * never for records whose source page was fetched but yielded nothing (broken layout?);
-        * only after ``tombstone_after_misses`` consecutive full crawls without the record;
-        * never more than ``tombstone_max_ratio`` of the dataset at once.
+        * only after a full crawl: not cancelled or stalled, no failed or skipped jobs, and no
+          work left behind when a page limit was hit;
+        * only for records whose **every known source page** was fetched fresh in this run and
+          yielded records (no cache, no empty/broken pages, only this run's own jobs);
+        * a miss is counted only for such eligible runs, and the record is removed after
+          ``tombstone_after_misses`` of them in a row;
+        * never more than ``tombstone_max_ratio`` of the dataset at once;
+        * only if the record's revision is unchanged since it was judged missing.
         """
         counts = self.store.job_counts(ctx.run_id)
+        remaining = counts["queued"] + counts["leased"]
         incomplete = [
             note for note in ctx.notes
-            if note.startswith(("run cancelled", "page limit", "llm limit", "queue stalled"))
+            if note.startswith(("run cancelled", "queue stalled"))
+            or (note.startswith("page limit") and remaining)
         ]
         ctx.full_crawl = not incomplete and not counts["failed"] and not counts["skipped"]
         if not ctx.full_crawl:
@@ -679,29 +687,26 @@ class PipelineRunner:
             )
             return
 
-        last_seen = self.analytics.last_versions(ctx.dataset_id)
-        sources = self.analytics.current_sources(ctx.dataset_id)
-        full_versions = sorted(
-            int(item["version"])
-            for item in self.store.dataset_versions(ctx.dataset_id)
-            if item["manifest"].get("full_crawl")
-        )
+        state = self.analytics.current_state(ctx.dataset_id)
+        sources = self.analytics.known_sources(ctx.dataset_id)
+        self.store.reset_misses(ctx.dataset_id, ctx.seen_keys)
+        eligible = [
+            key
+            for key, (_revision, version) in state.items()
+            if key not in ctx.seen_keys
+            and version < ctx.version
+            and sources.get(key)
+            and sources[key] <= ctx.checked_sources
+        ]
+        if not eligible:
+            return
+        misses = self.store.bump_misses(ctx.dataset_id, eligible, ctx.run_id)
         threshold = self.settings.tombstone_after_misses
-        candidates: list[str] = []
-        for key, version in last_seen.items():
-            if key in ctx.seen_keys or version >= ctx.version:
-                continue
-            source = sources.get(key, "")
-            if normalize_domain(source) not in ctx.crawled_domains or source in ctx.empty_sources:
-                continue
-            # misses = this run + earlier full crawls since the record was last observed
-            misses = 1 + sum(1 for v in full_versions if version < v < ctx.version)
-            if misses >= threshold:
-                candidates.append(key)
+        candidates = [key for key in eligible if misses.get(key, 0) >= threshold]
         if not candidates:
             return
 
-        total = len(last_seen)
+        total = len(state)
         if total and len(candidates) / total > self.settings.tombstone_max_ratio:
             self.store.add_event(
                 ctx.task.id, "tombstones_suspicious",
@@ -713,7 +718,10 @@ class PipelineRunner:
             )
             return
 
-        removed = self.analytics.tombstone(ctx.dataset_id, ctx.version, ctx.run_id, candidates)
+        removed = self.analytics.tombstone(
+            ctx.dataset_id, ctx.version, ctx.run_id, {key: state[key][0] for key in candidates}
+        )
+        self.store.reset_misses(ctx.dataset_id, candidates)
         ctx.stats.records_removed += removed
         self.store.add_event(
             ctx.task.id, "records_removed",
@@ -721,6 +729,19 @@ class PipelineRunner:
             run_id=ctx.run_id, level="info",
             data={"keys": candidates[:50], "count": removed},
         )
+
+    def rollback_removals(self, run_id: str) -> None:
+        """Undo tombstones and miss counts of a run that did not finalize its version."""
+        if self.store.run_has_version(run_id):
+            return  # the version is committed: its removals are part of history now
+        try:
+            removed = self.analytics.rollback_tombstones(run_id)
+            self.store.rollback_misses(run_id)
+        except Exception:  # noqa: BLE001 - best effort on an already failing path
+            logger.exception("could not roll back removals of run %s", run_id)
+            return
+        if removed:
+            logger.warning("rolled back %d tombstones of unfinished run %s", removed, run_id)
 
     async def _write_snapshot_and_diff(self, ctx: RunContext, version: int) -> list:
         previous_versions = [

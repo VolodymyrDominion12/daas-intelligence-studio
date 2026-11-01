@@ -177,7 +177,7 @@ def test_diff_detects_new_entities_and_price_drops(tmp_path: Path) -> None:
             count = con.execute("SELECT COUNT(*) FROM read_parquet(?)", [str(snapshot)]).fetchone()[0]
         finally:
             con.close()
-        assert count >= 4
+        assert count == 3  # state as of v2: alpha (latest price), beta, gamma — no stale revisions
     finally:
         analytics.close()
 

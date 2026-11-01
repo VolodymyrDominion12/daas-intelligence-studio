@@ -86,6 +86,8 @@ class Studio:
         interrupted = 0
         for run in self.store.list_unfinished_runs():
             self.store.cancel_run_jobs(run.id)
+            # Removals of a run that never finalized its dataset version must not stick.
+            self.runner.rollback_removals(run.id)
             self.store.update_run(
                 run.id,
                 status="failed",

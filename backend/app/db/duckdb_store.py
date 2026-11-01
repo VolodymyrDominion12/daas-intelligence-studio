@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS quarantine (
 # the record disappears from the current view, snapshots and diffs (→ ``removed_entity``).
 CURRENT_VIEW = """
 CREATE OR REPLACE VIEW current_records AS
-SELECT dataset_id, record_key, dataset_version, payload, provenance, source_url, observed_at
+SELECT dataset_id, record_key, dataset_version, revision, payload, provenance, source_url,
+       observed_at
 FROM (
     SELECT *, row_number() OVER (
         PARTITION BY dataset_id, record_key ORDER BY revision DESC
@@ -169,49 +170,79 @@ class AnalyticsStore:
         dataset_id: str,
         dataset_version: int,
         run_id: str | None,
-        record_keys: list[str],
+        expected: dict[str, int],
     ) -> int:
-        """Mark records as removed by appending a ``deleted`` version (last payload is kept)."""
-        if not record_keys:
+        """Mark records removed by appending a ``deleted`` version (last payload is kept).
+
+        ``expected`` maps record key → the revision seen when the record was judged missing. A key
+        is tombstoned only if that revision is still current, so a record re-observed meanwhile
+        (e.g. by a concurrent forced run) is never hidden.
+        """
+        if not expected:
             return 0
+        keys = list(expected)
+        revisions = [int(expected[key]) for key in keys]
         now = datetime.now(UTC).replace(tzinfo=None)
-        keys = list(dict.fromkeys(record_keys))
         with self._lock:
+            matching = """
+                FROM current_records c
+                JOIN (SELECT UNNEST(?::VARCHAR[]) AS record_key, UNNEST(?::BIGINT[]) AS revision) e
+                  ON c.record_key = e.record_key AND c.revision = e.revision
+                WHERE c.dataset_id = ?
+            """
             row = self._con.execute(
-                "SELECT COUNT(*) FROM current_records WHERE dataset_id = ?"
-                " AND record_key IN (SELECT UNNEST(?::VARCHAR[]))",
-                [dataset_id, keys],
+                f"SELECT COUNT(*) {matching}", [keys, revisions, dataset_id]
             ).fetchone()
             self._con.execute(
-                """
+                f"""
                 INSERT INTO record_versions
                     (dataset_id, record_key, dataset_version, run_id, source_url,
                      content_hash, payload, provenance, observed_at, deleted)
-                SELECT dataset_id, record_key, ?, ?, source_url, NULL, payload, provenance, ?, TRUE
-                FROM current_records
-                WHERE dataset_id = ? AND record_key IN (SELECT UNNEST(?::VARCHAR[]))
+                SELECT c.dataset_id, c.record_key, ?, ?, c.source_url, NULL, c.payload,
+                       c.provenance, ?, TRUE
+                {matching}
                 """,
-                [dataset_version, run_id, now, dataset_id, keys],
+                [dataset_version, run_id, now, keys, revisions, dataset_id],
             )
         return int(row[0]) if row else 0
 
-    def last_versions(self, dataset_id: str) -> dict[str, int]:
-        """Current (non-removed) record → dataset version in which it was last observed."""
+    def rollback_tombstones(self, run_id: str) -> int:
+        """Remove tombstones written by a run that never finalized its dataset version."""
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) FROM record_versions WHERE run_id = ? AND deleted", [run_id]
+            ).fetchone()
+            self._con.execute(
+                "DELETE FROM record_versions WHERE run_id = ? AND deleted", [run_id]
+            )
+        return int(row[0]) if row else 0
+
+    def current_state(self, dataset_id: str) -> dict[str, tuple[int, int]]:
+        """Current (non-removed) record → (revision, dataset version last observed)."""
         with self._lock:
             rows = self._con.execute(
-                "SELECT record_key, dataset_version FROM current_records"
+                "SELECT record_key, revision, dataset_version FROM current_records"
                 " WHERE dataset_id = ?",
                 [dataset_id],
             ).fetchall()
-        return {row[0]: int(row[1]) for row in rows}
+        return {row[0]: (int(row[1]), int(row[2])) for row in rows}
 
-    def current_sources(self, dataset_id: str) -> dict[str, str]:
+    def known_sources(self, dataset_id: str) -> dict[str, set[str]]:
+        """Every source URL each current record was ever observed on."""
         with self._lock:
             rows = self._con.execute(
-                "SELECT record_key, source_url FROM current_records WHERE dataset_id = ?",
+                """
+                SELECT v.record_key, LIST(DISTINCT v.source_url)
+                FROM record_versions v
+                JOIN current_records c
+                  ON c.dataset_id = v.dataset_id AND c.record_key = v.record_key
+                WHERE v.dataset_id = ? AND NOT COALESCE(v.deleted, FALSE)
+                  AND v.source_url IS NOT NULL
+                GROUP BY v.record_key
+                """,
                 [dataset_id],
             ).fetchall()
-        return {row[0]: row[1] or "" for row in rows}
+        return {row[0]: {url for url in row[1] if url} for row in rows}
 
     def quarantine(
         self, dataset_id: str, run_id: str | None, source_url: str, reason: str, payload: dict
@@ -365,10 +396,20 @@ class AnalyticsStore:
     def snapshot(self, dataset_id: str, version: int, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp = destination.with_suffix(".tmp.parquet")
+        # State of the dataset as of ``version``: the latest revision of every record that is
+        # not removed. Full history stays in DuckDB (record_versions / record history API).
         with self._lock:
             self._con.execute(
-                f"COPY (SELECT * FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?) "
-                f"TO '{_escape_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+                f"""
+                COPY (
+                    SELECT * EXCLUDE (rn) FROM (
+                        SELECT *, row_number() OVER (
+                            PARTITION BY record_key ORDER BY revision DESC
+                        ) AS rn
+                        FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
+                    ) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
+                ) TO '{_escape_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)
+                """,
                 [dataset_id, version],
             )
         tmp.replace(destination)
