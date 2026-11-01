@@ -194,10 +194,13 @@ async def test_partial_crawl_never_removes(tmp_path: Path) -> None:
 
 
 async def test_mass_removal_is_refused(tmp_path: Path) -> None:
+    # 1 of 3 records (33%) disappears, above a 20% safety threshold.
     fetcher = MutableFetcher()
-    studio, dataset_id, task_id = await _studio(tmp_path, fetcher, [SEED])
+    studio, dataset_id, task_id = await _studio(
+        tmp_path, fetcher, [SEED], tombstone_max_ratio=0.2
+    )
     try:
-        fetcher.html[SEED] = catalog_without("Бета Дентал", "Гама Смайл")  # 2 of 3 gone
+        fetcher.html[SEED] = catalog_without("Гама Смайл")
         await _run(studio, task_id, "collect")
 
         assert studio.analytics.count_records(dataset_id) == 3
