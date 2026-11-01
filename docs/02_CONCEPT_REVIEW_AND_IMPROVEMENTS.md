@@ -232,32 +232,8 @@ Search, Google Places (для локального бізнесу), OpenStreetMa
 
 ## 8. Пріоритезований беклог покращень
 
-**P0 — у MVP (тиждень 1–2):**
-1. Адаптери `Fetcher/Extractor/LLMProvider/SearchProvider/Enricher` + легкий httpx-шлях.
-2. Provenance + confidence + `record_versions` (append-only) + dataset version.
-3. LLM-каскад із бюджетом, кешем і захистом від injection (без tools, валідація, cross-check).
-4. Source Registry (robots/ToS/ліцензія) + PII-класифікація + маскування в семплах.
-5. SQLite-черга з lease + один DuckDB-writer + graceful resume.
-6. Gold-set eval + quarantine.
-7. Токен-авторизація локального API (bind 127.0.0.1) + SSRF/path-traversal захист.
-
-**P1 — одразу після MVP:**
-8. Discovery-провайдери (SearXNG/OSM/sitemap/Open Data) + реєстр вартості.
-9. Waterfall-збагачення: domain resolver, tech stack, contacts, jobs.
-10. Entity resolution (blocking + RapidFuzz + merge policy) і ручний unmerge.
-11. Scheduler + щоденні Parquet-снапшоти + тригери (price drop, new vacancy, out-of-stock).
-12. Експорти з контрактом/ліцензією; демо-семпл із маскуванням.
-
-**P2 — масштаб і зручність:**
-13. Опційні важкі рушії (Playwright/Crawl4AI/Camoufox) як сайдкар; проксі-провайдери з health-score.
-14. Семантичний пошук (LanceDB) за інтерфейсом; FTS5 як дефолт.
-15. Browser-Use для складних сценаріїв; vision-fallback для застарілих порталів.
-16. Diff/merge UI для схеми, «explain this row», undo.
-
-**P3 — монетизація:**
-17. Публічний Data API (окремий сервіс) + API-ключі + метеринг + SLA.
-18. Клієнтський портал, білінг (Stripe), ліцензійні ключі.
-19. Маркетплейс готових дата-продуктів (каталог + прев'ю).
+Єдине джерело правди для беклогу — [`03_IMPLEMENTATION_PLAN.md` §6](./03_IMPLEMENTATION_PLAN.md#6-беклог-із-пріоритетами).
+Тут його більше не дублюємо, щоб списки не розходились.
 
 ---
 
