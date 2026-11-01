@@ -313,20 +313,20 @@ class AnalyticsStore:
             params.extend([_json_path(key), f"%{value}%"])
         where_sql = " AND ".join(where)
 
-        order_sql = "record_key"
+        # Direction applies to the sort column itself (it used to reach only the tie-breaker).
+        order_dir = "DESC" if direction.lower() == "desc" else "ASC"
+        order_sql = f"record_key {order_dir}"
         order_params: list[Any] = []
         if sort and _safe_key(sort) in type_map:
             key = _safe_key(sort)
-            expression = _JSON_FIELD
             order_params.append(_json_path(key))
             if type_map.get(key) in NUMERIC_DTYPES:
-                order_sql = f"TRY_CAST({expression} AS DOUBLE)"
+                expression = f"TRY_CAST({_JSON_FIELD} AS DOUBLE)"
             elif type_map.get(key) == "datetime":
-                order_sql = f"TRY_CAST({expression} AS TIMESTAMP)"
+                expression = f"TRY_CAST({_JSON_FIELD} AS TIMESTAMP)"
             else:
-                order_sql = f"lower({expression})"
-            order_sql += " NULLS LAST, record_key"
-        order_sql += " DESC" if direction.lower() == "desc" else " ASC"
+                expression = f"lower({_JSON_FIELD})"
+            order_sql = f"{expression} {order_dir} NULLS LAST, record_key {order_dir}"
 
         with self._lock:
             total = self._con.execute(

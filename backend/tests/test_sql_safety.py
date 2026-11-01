@@ -52,8 +52,12 @@ def test_unsafe_column_keys_are_rejected(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             analytics.query_records("ds", columns=COLUMNS, filters={"name') OR 1=1 --": "x"})
         # an unknown or unsafe sort key falls back to the default order, never reaches SQL
-        page = analytics.query_records("ds", columns=COLUMNS, sort="price", direction="desc")
-        assert [row["record_key"] for row in page["items"]] == ["a", "b"]
+        desc = analytics.query_records("ds", columns=COLUMNS, sort="price", direction="desc")
+        assert [row["record_key"] for row in desc["items"]] == ["a", "b"]  # 10.0, 5.0
+        asc = analytics.query_records("ds", columns=COLUMNS, sort="price", direction="asc")
+        assert [row["record_key"] for row in asc["items"]] == ["b", "a"]
+        by_name = analytics.query_records("ds", columns=COLUMNS, sort="name", direction="desc")
+        assert [row["record_key"] for row in by_name["items"]] == ["a", "b"]  # o'brien > beta
     finally:
         analytics.close()
 
