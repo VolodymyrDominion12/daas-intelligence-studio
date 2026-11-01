@@ -86,6 +86,7 @@ export interface RunStats {
   records_new: number
   records_updated: number
   records_quarantined: number
+  records_removed?: number
   enrichments_run: number
   llm_calls: number
   llm_usd: number

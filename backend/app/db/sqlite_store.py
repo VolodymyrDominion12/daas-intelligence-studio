@@ -162,6 +162,19 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        3,
+        """
+        CREATE TABLE record_misses (
+            dataset_id TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            misses INTEGER NOT NULL DEFAULT 0,
+            last_run_id TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (dataset_id, record_key)
+        );
+        """,
+    ),
 ]
 
 
@@ -453,8 +466,14 @@ class OperationalStore:
         return int(total)
 
     def claim_jobs(
-        self, worker: str, *, limit: int = 8, lease_seconds: int = 120
+        self,
+        worker: str,
+        *,
+        run_id: str | None = None,
+        limit: int = 8,
+        lease_seconds: int = 120,
     ) -> list[dict[str, Any]]:
+        """Lease queued jobs. Pass ``run_id`` so a run never processes another run's pages."""
         now = utcnow()
         lease_until = iso(now + timedelta(seconds=lease_seconds))
         with self._lock:
@@ -464,13 +483,13 @@ class OperationalStore:
                        attempts = attempts + 1, updated_at = ?
                 WHERE id IN (
                     SELECT id FROM jobs
-                    WHERE status = 'queued'
+                    WHERE status = 'queued' AND (? IS NULL OR run_id = ?)
                     ORDER BY id
                     LIMIT ?
                 )
                 RETURNING id, run_id, task_id, kind, url, depth, parent_url, attempts, max_attempts
                 """,
-                (worker, lease_until, iso(now), limit),
+                (worker, lease_until, iso(now), run_id, run_id, limit),
             )
             rows = [dict(row) for row in cursor.fetchall()]
         return rows
@@ -637,6 +656,9 @@ class OperationalStore:
                 "UPDATE datasets SET updated_at = ? WHERE id = ?", (iso(), dataset_id)
             )
 
+    def run_has_version(self, run_id: str) -> bool:
+        return self._one("SELECT 1 FROM dataset_versions WHERE run_id = ? LIMIT 1", (run_id,)) is not None
+
     def dataset_versions(self, dataset_id: str) -> list[dict[str, Any]]:
         rows = self._all(
             "SELECT * FROM dataset_versions WHERE dataset_id = ? ORDER BY version DESC",
@@ -696,6 +718,48 @@ class OperationalStore:
                 " fetched_at = excluded.fetched_at, size = excluded.size, engine = excluded.engine",
                 (url, content_hash, status, iso(), size, engine),
             )
+
+    # -- tombstone bookkeeping (P1-03) -------------------------------------
+    def bump_misses(self, dataset_id: str, keys: Iterable[str], run_id: str) -> dict[str, int]:
+        """+1 miss for each key (once per run); returns the new miss counts."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return {}
+        now = iso()
+        with self._tx() as conn:
+            conn.executemany(
+                "INSERT INTO record_misses(dataset_id, record_key, misses, last_run_id, updated_at)"
+                " VALUES (?,?,1,?,?) ON CONFLICT(dataset_id, record_key) DO UPDATE SET"
+                " misses = CASE WHEN record_misses.last_run_id IS excluded.last_run_id"
+                "   THEN record_misses.misses ELSE record_misses.misses + 1 END,"
+                " last_run_id = excluded.last_run_id, updated_at = excluded.updated_at",
+                [(dataset_id, key, run_id, now) for key in keys],
+            )
+            placeholders = ",".join("?" * len(keys))
+            rows = conn.execute(
+                f"SELECT record_key, misses FROM record_misses WHERE dataset_id = ?"
+                f" AND record_key IN ({placeholders})",
+                (dataset_id, *keys),
+            ).fetchall()
+        return {row["record_key"]: int(row["misses"]) for row in rows}
+
+    def reset_misses(self, dataset_id: str, keys: Iterable[str]) -> None:
+        batch = [(dataset_id, key) for key in keys]
+        if batch:
+            with self._lock:
+                self._conn.executemany(
+                    "DELETE FROM record_misses WHERE dataset_id = ? AND record_key = ?", batch
+                )
+
+    def rollback_misses(self, run_id: str) -> None:
+        """Undo the misses counted by a run that never finished."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE record_misses SET misses = misses - 1, last_run_id = NULL"
+                " WHERE last_run_id = ?",
+                (run_id,),
+            )
+            self._conn.execute("DELETE FROM record_misses WHERE misses <= 0")
 
     def forget_pages(self, urls: Iterable[str]) -> None:
         batch = [(url,) for url in urls]

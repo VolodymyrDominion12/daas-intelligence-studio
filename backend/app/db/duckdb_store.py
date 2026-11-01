@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS record_versions (
     payload         JSON,
     provenance      JSON,
     observed_at     TIMESTAMP NOT NULL,
+    deleted         BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (dataset_id, record_key, revision)
 );
 
@@ -51,20 +52,37 @@ CREATE TABLE IF NOT EXISTS quarantine (
 );
 """
 
+
+# A tombstone is a regular version row with ``deleted = TRUE``: history stays append-only, and
+# the record disappears from the current view, snapshots and diffs (→ ``removed_entity``).
+SNAPSHOT_STATE_SQL = """
+SELECT * EXCLUDE (rn) FROM (
+    SELECT *, row_number() OVER (PARTITION BY record_key ORDER BY revision DESC) AS rn
+    FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
+) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
+"""
+
 CURRENT_VIEW = """
 CREATE OR REPLACE VIEW current_records AS
-SELECT dataset_id, record_key, dataset_version, payload, provenance, source_url, observed_at
+SELECT dataset_id, record_key, dataset_version, revision, payload, provenance, source_url,
+       observed_at
 FROM (
     SELECT *, row_number() OVER (
         PARTITION BY dataset_id, record_key ORDER BY revision DESC
     ) AS rn
     FROM record_versions
 )
-WHERE rn = 1;
+WHERE rn = 1 AND NOT COALESCE(deleted, FALSE);
 """
 
 NUMERIC_DTYPES = {"number", "integer"}
 _JSON_PATH = "$.\"{key}\""
+# Every JSON path is passed as a bound parameter, never spliced into SQL text.
+_JSON_FIELD = "json_extract_string(payload, ?)"
+
+
+def _json_path(key: str) -> str:
+    return _JSON_PATH.format(key=_safe_key(key))
 
 
 class AnalyticsStore:
@@ -79,9 +97,33 @@ class AnalyticsStore:
             self._con.execute("SET preserve_insertion_order=true")
             if not read_only:
                 self._con.execute(SCHEMA)
+                self._migrate()
                 self._con.execute(CURRENT_VIEW)
 
     # -- infrastructure ---------------------------------------------------
+    def _migrate(self) -> None:
+        """Forward-only migrations for files created by older versions.
+
+        DuckDB refuses ``ALTER TABLE`` on a table that has an index, so the index is dropped and
+        recreated around the change.
+        """
+        columns = {
+            row[0]
+            for row in self._con.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'record_versions'"
+            ).fetchall()
+        }
+        if "deleted" not in columns:
+            self._con.execute("DROP INDEX IF EXISTS idx_record_versions_lookup")
+            self._con.execute(
+                "ALTER TABLE record_versions ADD COLUMN deleted BOOLEAN DEFAULT FALSE"
+            )
+            self._con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_record_versions_lookup"
+                " ON record_versions(dataset_id, record_key, revision)"
+            )
+
     def close(self) -> None:
         with self._lock:
             self._con.close()
@@ -136,6 +178,85 @@ class AnalyticsStore:
             )
         return len(rows)
 
+    def tombstone(
+        self,
+        dataset_id: str,
+        dataset_version: int,
+        run_id: str | None,
+        expected: dict[str, int],
+    ) -> int:
+        """Mark records removed by appending a ``deleted`` version (last payload is kept).
+
+        ``expected`` maps record key → the revision seen when the record was judged missing. A key
+        is tombstoned only if that revision is still current, so a record re-observed meanwhile
+        (e.g. by a concurrent forced run) is never hidden.
+        """
+        if not expected:
+            return 0
+        keys = list(expected)
+        revisions = [int(expected[key]) for key in keys]
+        now = datetime.now(UTC).replace(tzinfo=None)
+        with self._lock:
+            matching = """
+                FROM current_records c
+                JOIN (SELECT UNNEST(?::VARCHAR[]) AS record_key, UNNEST(?::BIGINT[]) AS revision) e
+                  ON c.record_key = e.record_key AND c.revision = e.revision
+                WHERE c.dataset_id = ?
+            """
+            row = self._con.execute(
+                f"SELECT COUNT(*) {matching}", [keys, revisions, dataset_id]
+            ).fetchone()
+            self._con.execute(
+                f"""
+                INSERT INTO record_versions
+                    (dataset_id, record_key, dataset_version, run_id, source_url,
+                     content_hash, payload, provenance, observed_at, deleted)
+                SELECT c.dataset_id, c.record_key, ?, ?, c.source_url, NULL, c.payload,
+                       c.provenance, ?, TRUE
+                {matching}
+                """,
+                [dataset_version, run_id, now, keys, revisions, dataset_id],
+            )
+        return int(row[0]) if row else 0
+
+    def rollback_tombstones(self, run_id: str) -> int:
+        """Remove tombstones written by a run that never finalized its dataset version."""
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) FROM record_versions WHERE run_id = ? AND deleted", [run_id]
+            ).fetchone()
+            self._con.execute(
+                "DELETE FROM record_versions WHERE run_id = ? AND deleted", [run_id]
+            )
+        return int(row[0]) if row else 0
+
+    def current_state(self, dataset_id: str) -> dict[str, tuple[int, int]]:
+        """Current (non-removed) record → (revision, dataset version last observed)."""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT record_key, revision, dataset_version FROM current_records"
+                " WHERE dataset_id = ?",
+                [dataset_id],
+            ).fetchall()
+        return {row[0]: (int(row[1]), int(row[2])) for row in rows}
+
+    def known_sources(self, dataset_id: str) -> dict[str, set[str]]:
+        """Every source URL each current record was ever observed on."""
+        with self._lock:
+            rows = self._con.execute(
+                """
+                SELECT v.record_key, LIST(DISTINCT v.source_url)
+                FROM record_versions v
+                JOIN current_records c
+                  ON c.dataset_id = v.dataset_id AND c.record_key = v.record_key
+                WHERE v.dataset_id = ? AND NOT COALESCE(v.deleted, FALSE)
+                  AND v.source_url IS NOT NULL
+                GROUP BY v.record_key
+                """,
+                [dataset_id],
+            ).fetchall()
+        return {row[0]: {url for url in row[1] if url} for row in rows}
+
     def quarantine(
         self, dataset_id: str, run_id: str | None, source_url: str, reason: str, payload: dict
     ) -> None:
@@ -188,22 +309,24 @@ class AnalyticsStore:
         for key, value in (filters or {}).items():
             if value in (None, ""):
                 continue
-            where.append(f"json_extract_string(payload, '{_JSON_PATH.format(key=_safe_key(key))}') ILIKE ?")
-            params.append(f"%{value}%")
+            where.append(f"{_JSON_FIELD} ILIKE ?")
+            params.extend([_json_path(key), f"%{value}%"])
         where_sql = " AND ".join(where)
 
-        order_sql = "record_key"
+        # Direction applies to the sort column itself (it used to reach only the tie-breaker).
+        order_dir = "DESC" if direction.lower() == "desc" else "ASC"
+        order_sql = f"record_key {order_dir}"
+        order_params: list[Any] = []
         if sort and _safe_key(sort) in type_map:
             key = _safe_key(sort)
-            expression = f"json_extract_string(payload, '{_JSON_PATH.format(key=key)}')"
+            order_params.append(_json_path(key))
             if type_map.get(key) in NUMERIC_DTYPES:
-                order_sql = f"TRY_CAST({expression} AS DOUBLE)"
+                expression = f"TRY_CAST({_JSON_FIELD} AS DOUBLE)"
             elif type_map.get(key) == "datetime":
-                order_sql = f"TRY_CAST({expression} AS TIMESTAMP)"
+                expression = f"TRY_CAST({_JSON_FIELD} AS TIMESTAMP)"
             else:
-                order_sql = f"lower({expression})"
-            order_sql += " NULLS LAST, record_key"
-        order_sql += " DESC" if direction.lower() == "desc" else " ASC"
+                expression = f"lower({_JSON_FIELD})"
+            order_sql = f"{expression} {order_dir} NULLS LAST, record_key {order_dir}"
 
         with self._lock:
             total = self._con.execute(
@@ -212,7 +335,7 @@ class AnalyticsStore:
             rows = self._con.execute(
                 f"SELECT record_key, payload, provenance, source_url, observed_at "
                 f"FROM current_records WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
-                [*params, limit, offset],
+                [*params, *order_params, limit, offset],
             ).fetchall()
         items = [self._row_to_item(row) for row in rows]
         return {"items": items, "total": int(total), "limit": limit, "offset": offset}
@@ -229,8 +352,8 @@ class AnalyticsStore:
     def record_history(self, dataset_id: str, record_key: str, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._con.execute(
-                "SELECT dataset_version, revision, payload, provenance, source_url, observed_at "
-                "FROM record_versions WHERE dataset_id = ? AND record_key = ? "
+                "SELECT dataset_version, revision, payload, provenance, source_url, observed_at, "
+                "COALESCE(deleted, FALSE) FROM record_versions WHERE dataset_id = ? AND record_key = ? "
                 "ORDER BY revision DESC LIMIT ?",
                 [dataset_id, record_key, limit],
             ).fetchall()
@@ -242,6 +365,7 @@ class AnalyticsStore:
                 "provenance": json_loads(row[3], {}),
                 "source_url": row[4],
                 "observed_at": row[5],
+                "deleted": bool(row[6]),
             }
             for row in rows
         ]
@@ -259,14 +383,12 @@ class AnalyticsStore:
         if not columns:
             return {}
         selects = ", ".join(
-            f"AVG(CASE WHEN json_extract_string(payload, '{_JSON_PATH.format(key=_safe_key(c.key))}')"
-            f" IS NOT NULL THEN 1.0 ELSE 0.0 END) AS \"{_safe_key(c.key)}\""
-            for c in columns
+            f"AVG(CASE WHEN {_JSON_FIELD} IS NOT NULL THEN 1.0 ELSE 0.0 END)" for _ in columns
         )
         with self._lock:
             row = self._con.execute(
                 f"SELECT {selects}, COUNT(*) AS total FROM current_records WHERE dataset_id = ?",
-                [dataset_id],
+                [*[_json_path(c.key) for c in columns], dataset_id],
             ).fetchone()
         total = row[-1] if row else 0
         if not total:
@@ -287,11 +409,12 @@ class AnalyticsStore:
     def snapshot(self, dataset_id: str, version: int, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp = destination.with_suffix(".tmp.parquet")
+        # State of the dataset as of ``version``: the latest revision of every record that is
+        # not removed. Full history stays in DuckDB (record_versions / record history API).
+        # The file path is handed to DuckDB's relation API as an argument — no SQL text is built.
         with self._lock:
-            self._con.execute(
-                f"COPY (SELECT * FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?) "
-                f"TO '{_escape_path(tmp)}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-                [dataset_id, version],
+            self._con.sql(SNAPSHOT_STATE_SQL, params=[dataset_id, version]).write_parquet(
+                str(tmp), compression="zstd"
             )
         tmp.replace(destination)
         return destination
@@ -301,10 +424,10 @@ class AnalyticsStore:
             rows = self._con.execute(
                 """
                 SELECT record_key, payload FROM (
-                    SELECT record_key, payload,
+                    SELECT record_key, payload, deleted,
                            row_number() OVER (PARTITION BY record_key ORDER BY revision DESC) AS rn
                     FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
-                ) WHERE rn = 1
+                ) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
                 """,
                 [dataset_id, version],
             ).fetchall()
@@ -404,7 +527,11 @@ class AnalyticsStore:
         fmt: str,
     ) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        names = ["record_key", *[column.key for column in columns], "_source_url", "_observed_at"]
+        names = [
+            _safe_key(name)
+            for name in ["record_key", *[column.key for column in columns], "_source_url",
+                         "_observed_at"]
+        ]
         types = {"number": "DOUBLE", "integer": "BIGINT", "boolean": "BOOLEAN",
                  "datetime": "VARCHAR"}
         definition = ", ".join(
@@ -428,11 +555,11 @@ class AnalyticsStore:
                     self._con.executemany(
                         f"INSERT INTO {temp_table} VALUES ({placeholders})", values
                     )
-                options = "FORMAT PARQUET, COMPRESSION ZSTD" if fmt == "parquet" else "HEADER, DELIMITER ','"
-                self._con.execute(
-                    f"COPY (SELECT * FROM {temp_table}) TO '{_escape_path(destination)}' "
-                    f"({options})"
-                )
+                relation = self._con.table(temp_table)
+                if fmt == "parquet":
+                    relation.write_parquet(str(destination), compression="zstd")
+                else:
+                    relation.write_csv(str(destination), sep=",", header=True)
             finally:
                 self._con.execute(f"DROP TABLE IF EXISTS {temp_table}")
         return destination
@@ -458,10 +585,6 @@ def _safe_key(key: str) -> str:
     if not key.replace("_", "").isalnum():
         raise ValueError(f"unsafe column key: {key!r}")
     return key
-
-
-def _escape_path(path: Path) -> str:
-    return str(path).replace("'", "''")
 
 
 def _dtype_of(name: str, columns: list[FieldSpec]) -> str:

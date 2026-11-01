@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     max_llm_calls_per_run: int = 25
     max_enrich_concurrency: int = 3
     price_drop_threshold_pct: float = 5.0
+    # Tombstones (P1-03): a record missing from N consecutive full crawls is marked removed.
+    tombstone_after_misses: int = Field(default=1, ge=1, le=30)
+    # Safety valve: never remove more than this share of a dataset in one run (broken site/layout).
+    tombstone_max_ratio: float = Field(default=0.5, gt=0.0, le=1.0)
 
     # --- LLM --------------------------------------------------------------
     llm_provider: Literal["auto", "openai_compat", "mock", "disabled"] = "auto"

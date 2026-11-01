@@ -175,6 +175,12 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
           <span className="stat-chip-label">Оновлено</span>
           <span className="stat-chip-value">↻{fmtNumber(dataRun?.stats.records_updated ?? 0)}</span>
         </div>
+        {(dataRun?.stats.records_removed ?? 0) > 0 && (
+          <div className="stat-chip" title="Не знайдені при повному проході джерела">
+            <span className="stat-chip-label">Зникло</span>
+            <span className="stat-chip-value">−{fmtNumber(dataRun?.stats.records_removed ?? 0)}</span>
+          </div>
+        )}
         <div className="stat-chip">
           <span className="stat-chip-label">LLM</span>
           <span className="stat-chip-value">${(dataRun?.spent_usd ?? 0).toFixed(3)}</span>
