@@ -9,9 +9,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from ..compliance import ComplianceError
 from ..enrichment.registry import enricher_catalog
 from ..models import EventInfo
-from ..compliance import ComplianceError
 from ..runtime import RunConflict as RunConflictError
 from ..utils import iso
 from .deps import StudioDep

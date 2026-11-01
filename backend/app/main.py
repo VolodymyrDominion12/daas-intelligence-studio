@@ -17,8 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import data as data_routes
 from .api import tasks as task_routes
-from .config import PROJECT_ROOT, Settings, get_settings
 from .compliance import ComplianceError
+from .config import PROJECT_ROOT, Settings, get_settings
 from .runtime import RunConflict, Studio
 from .utils import UnsafeUrlError
 
