@@ -23,8 +23,11 @@ backend/.uv-python/
 backend/.fresh-test/
 coverage.xml
 
-# Local runtime data (never commit scraped data / secrets)
-storage/
+# Local runtime data (never commit scraped data / secrets).
+# Anchored to the repo root: an unanchored `storage/` also hid the code package
+# backend/app/storage/ (raw_cache, exports, backup) and broke fresh clones.
+/storage/
+/backend/storage/
 .env
 .env.local
 *.duckdb

@@ -179,6 +179,11 @@ sequenceDiagram
 
 ## 5. Пропонована структура проекту (`daas-intelligence-studio`)
 
+> [!WARNING]
+> **Історичний розділ.** Фактична структура коду — у [`03` §10](./03_IMPLEMENTATION_PLAN.md#10-структура-коду-v01),
+> а пріоритети — у [`03` §6](./03_IMPLEMENTATION_PLAN.md#6-беклог-із-пріоритетами). Redis/Celery, `agents/` і `scrapers/`
+> не реалізовуються (ADR-02, ADR-03 у документі 02).
+
 ```text
 daas-intelligence-studio/
 ├── docs/
@@ -205,6 +210,11 @@ daas-intelligence-studio/
 ---
 
 ## 6. План реалізації (Roadmap від MVP до повноцінної платформи)
+
+> [!WARNING]
+> **Історичний розділ.** Фактична структура коду — у [`03` §10](./03_IMPLEMENTATION_PLAN.md#10-структура-коду-v01),
+> а пріоритети — у [`03` §6](./03_IMPLEMENTATION_PLAN.md#6-беклог-із-пріоритетами). Redis/Celery, `agents/` і `scrapers/`
+> не реалізовуються (ADR-02, ADR-03 у документі 02).
 
 * **Етап 1 (Швидкий MVP — "Фабрика Датасетів"):**
   - Налаштування ядра: `FastAPI` + `Crawl4AI` + `Scrapling/Camoufox` + локальна `Ollama (ReaderLM-v2)` + `DuckDB`.

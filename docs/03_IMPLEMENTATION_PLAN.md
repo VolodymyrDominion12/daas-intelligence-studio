@@ -45,7 +45,7 @@
 | Офлайн-демо з живим джерелом | `app/demo.py`, `daas demo --serve` | ручний прогін + скріншоти |
 | Міграції SQLite, бекап, retention purge | `app/db/sqlite_store.py`, `daas backup`, `/api/maintenance/purge-cache` | частково тестами |
 
-**Стан якості на v0.1:** 55 тестів (pytest, повністю офлайн), `ruff` без зауважень, frontend
+**Стан якості на v0.1:** 55 тестів (до інциденту Фази 0; див. §2a) (pytest, повністю офлайн), `ruff` без зауважень, frontend
 `tsc` + `vite build` без помилок. Час демо-пайплайну: кілька секунд на 4 записи.
 
 ### Критерії приймання v0.1 (виконані)
@@ -58,6 +58,23 @@
 - [x] LLM-бюджет, кеш, ліміт викликів на прогін; витрати видно в UI.
 - [x] Локальний API закритий токеном; приватні/loopback цілі заблоковані для зовнішніх URL.
 - [x] Тести не ходять у мережу.
+
+---
+
+## 2a. Фаза 0: відновлення робочого стану (листопад 2026)
+
+**Інцидент.** Правило `storage/` у `.gitignore` не було прив'язане до кореня і сховало пакет коду
+`backend/app/storage/` (`raw_cache.py`, `exports.py`, `backup.py`). Свіжий клон падав на
+`import app`, CI і `daas demo` не працювали. Модулі відновлено за контрактами з решти коду й тестів.
+
+| ID | Що зроблено | Перевірка |
+|:---|:---|:---|
+| F0-01 | Відновлено `app/storage/`: zstd raw-кеш з індексом у SQLite і TTL/purge; експорт CSV (BOM) / XLSX (аркуші «Дані», «Маніфест», «Колонки») / Parquet / JSON з маніфестом і sha256; zip-бекап | `test_storage.py`, `test_api_flow.py`, `test_raw_cache_backup.py` |
+| F0-02 | `.gitignore`: `/storage/` і `/backend/storage/` замість `storage/` | `test_package_integrity.py::test_source_files_are_not_gitignored` |
+| F0-03 | Тест «кожен модуль `app.*` імпортується» | `test_package_integrity.py` |
+| F0-04 | `00_MARKET_DEMAND.md` у репозиторії; беклог лише тут; застарілі розділи 01 позначено | — |
+
+Додатково: захист від formula injection у CSV/XLSX (текст, що починається з `=`, `+`, `-`, `@`).
 
 ---
 
@@ -157,18 +174,25 @@
 
 ## 6. Беклог із пріоритетами
 
-| ID | Задача | Розмір | Пріоритет | Залежності |
+Порядок переглянуто з урахуванням [`00_MARKET_DEMAND.md`](./00_MARKET_DEMAND.md): гроші — у підписці на
+регулярний потік даних із легальних відкритих джерел, тому доставка й розклад піднялися вище за
+merge/unmerge.
+
+| ID | Задача | Розмір | Фаза | Залежності |
 |:---|:---|:---:|:---:|:---|
-| P1-01 | Gold-set eval + метрики в маніфесті | M | P0 | — |
-| P1-02 | Merge/unmerge дублікатів + UI-черга | L | P0 | P1-01 |
-| P1-03 | Tombstones + full-crawl diff | M | P0 | P1-05 |
-| P1-04 | Комплаєнс-енфорсмент (forbidden/high) | S | P0 | — |
-| P1-05 | APScheduler + cron + ноутіфікації | M | P1 | P1-03 |
-| P1-06 | Proxy provider + circuit breaker | M | P1 | — |
-| P1-07 | JS-детекція + Playwright сайдкар | M | P1 | P1-06 |
-| P1-08 | Карантин у UI + причина | S | P1 | P1-01 |
-| P1-09 | Атрибуція plan-витрат + /metrics | S | P1 | — |
-| P1-10 | Редактор spec + schema diff | M | P2 | — |
+| F0-01…04 | Відновлення `app/storage`, `.gitignore`, тест цілісності, доки | M | 0 ✅ | — |
+| P1-04 | Комплаєнс-енфорсмент: `forbidden` → стоп, `high` → підтвердження + audit, без збору за логіном | S | 1 | — |
+| P1-03 | Tombstones + full-crawl diff (`removed_entity`) | M | 1 | — |
+| P1-01 | Gold-set eval + метрики в маніфесті | M | 1 | — |
+| P1-05 | Планувальник (cron на задачу) + доганяючий прогін | M | 2 | P1-03 |
+| D-01 | Канали доставки дельти: webhook, Telegram, Google Sheets | M | 2 | P1-05 |
+| D-02 | Джерело Prozorro (відкритий API) як перший дата-продукт | M | 2 | P1-04 |
+| P1-08 | Карантин у UI + причина | S | 3 | P1-01 |
+| P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 | — |
+| P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 | P1-01 |
+| P1-06 | Proxy provider + circuit breaker | M | 3 | — |
+| P1-07 | JS-детекція + Playwright сайдкар | M | 3 | P1-06 |
+| P1-10 | Редактор spec + schema diff | M | 3 | — |
 | P2-01 | Discovery: sitemap/OSM/Open Data | M | P2 | — |
 | P2-02 | FTS5 + семантичний пошук | M | P2 | — |
 | P2-03 | Splink batch ER | L | P2 | P1-02 |
@@ -176,6 +200,9 @@
 | P3-01 | Data API сервіс + ключі + метеринг | L | P3 | P2-04 |
 | P3-02 | Портал + Stripe | L | P3 | P3-01 |
 | P3-03 | Data contract + SLA | M | P3 | P1-01 |
+
+**Фаза 1 — довіра** (комплаєнс, видалення, точність) → **Фаза 2 — підписка** (розклад, доставка,
+Prozorro) → **Фаза 3 — масштаб**. P2/P3 чекають першого платного клієнта.
 
 ---
 
@@ -218,7 +245,7 @@
 ```bash
 cd backend
 uv sync --extra dev
-uv run pytest -q          # 55 tests, offline
+uv run pytest -q          # offline
 uv run ruff check app tests
 ```
 
@@ -248,7 +275,7 @@ backend/
 │   ├── llm/            # providers, router, prompts, guard, parsing
 │   ├── pipeline/       # planner, calibration, runner
 │   ├── scraping/       # fetcher, politeness (robots/rate), page (markdown/links)
-│   ├── storage/        # raw_cache (zstd), exports (csv/xlsx/parquet/json)
+│   ├── storage/        # raw_cache (zstd), exports (csv/xlsx/parquet/json), backup
 │   ├── cli.py          # serve/init/doctor/demo/task/calibrate/collect/enrich/export/backup
 │   ├── config.py       # Settings (env DAAS_*), Paths, runtime token
 │   ├── demo.py         # офлайн-сайт + живий демо-сервер
@@ -257,7 +284,7 @@ backend/
 │   ├── presets.py      # офлайн-шаблони колонок
 │   ├── runtime.py      # Studio: композиція + життєвий цикл запусків
 │   └── utils.py        # coerce, PII, SSRF, record_key, телефон/ціна
-└── tests/              # 7 модулів, fixtures/*.html
+└── tests/              # 9 модулів, fixtures/*.html
 frontend/
 └── src/                # App, Sidebar, TaskWorkspace, DataGrid, Calibration, Export, …
 ```

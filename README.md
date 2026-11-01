@@ -167,7 +167,7 @@ flowchart LR
 
 ```bash
 cd backend
-uv run pytest -q            # 55 тестів, без мережі
+uv run pytest -q            # без мережі
 uv run ruff check app tests
 
 cd ../frontend
@@ -211,6 +211,7 @@ npm run build               # tsc + vite
 
 | Документ | Про що |
 |:---|:---|
+| [00. Попит на дані](docs/00_MARKET_DEMAND.md) | дослідження ринку: за які дані платять і чому |
 | [01. Концепція та архітектура](docs/01_CONCEPT_AND_ARCHITECTURE.md) | початкова ідея, стек, UX |
 | [02. Огляд і покращення](docs/02_CONCEPT_REVIEW_AND_IMPROVEMENTS.md) | критичний розбір, фактчек, P0-ризики, ADR |
 | [03. План і статус](docs/03_IMPLEMENTATION_PLAN.md) | що зроблено, беклог, критерії приймання, обмеження |
@@ -219,7 +220,9 @@ npm run build               # tsc + vite
 
 ## Roadmap
 
-- **P1:** eval-харнес (precision/recall), merge/unmerge дублікатів, tombstones + full-crawl diff,
-  планувальник і ноутіфікації, комплаєнс-енфорсмент, проксі-провайдери, карантин у UI.
-- **P2:** discovery (sitemap/OSM/Open Data), JS-рендеринг сайдкаром, FTS/семантика, Splink batch ER.
-- **P3:** окремий Data API з ключами й метерингом, клієнтський портал, білінг, маркетплейс дата-продуктів.
+Повний беклог — у [`docs/03_IMPLEMENTATION_PLAN.md` §6](docs/03_IMPLEMENTATION_PLAN.md#6-беклог-із-пріоритетами).
+
+- **Фаза 1 — довіра:** комплаєнс-енфорсмент (forbidden/high, без збору за логіном), tombstones, eval-харнес.
+- **Фаза 2 — підписка:** планувальник, доставка дельти (webhook/Telegram/Google Sheets), джерело Prozorro.
+- **Фаза 3 — масштаб:** карантин у UI, merge/unmerge, проксі, Playwright-сайдкар, `/metrics`.
+- **P2/P3:** discovery, FTS/семантика, Splink, Data API, портал, білінг.

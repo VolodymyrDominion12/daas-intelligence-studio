@@ -664,6 +664,13 @@ class OperationalStore:
                 (url, content_hash, status, iso(), size, engine),
             )
 
+    def forget_pages(self, urls: Iterable[str]) -> None:
+        batch = [(url,) for url in urls]
+        if not batch:
+            return
+        with self._lock:
+            self._conn.executemany("DELETE FROM raw_pages WHERE url = ?", batch)
+
     def page_meta(self, url: str) -> dict[str, Any] | None:
         row = self._one("SELECT * FROM raw_pages WHERE url = ?", (url,))
         return dict(row) if row else None
