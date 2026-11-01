@@ -28,6 +28,12 @@ export const TOKEN =
       ? __DAAS_TOKEN__
       : ''
 
+/** Explicit acknowledgement for sources with tos_risk=high (server answers 428 without it). */
+export interface RiskAck {
+  acknowledge_high_risk?: boolean
+  reason?: string
+}
+
 export class ApiError extends Error {
   status: number
 
@@ -90,9 +96,18 @@ export const api = {
     }),
   deleteColumn: (id: string, key: string) =>
     request<{ task: TaskInfo }>(`/tasks/${id}/columns/${key}`, { method: 'DELETE' }),
-  calibrate: (id: string) =>
-    request<{ run: RunInfo }>(`/tasks/${id}/calibrate`, { method: 'POST' }),
-  run: (id: string, options: { skip_calibration?: boolean; force?: boolean } = {}) =>
+  calibrate: (id: string, ack: RiskAck = {}) => {
+    const params = new URLSearchParams()
+    if (ack.acknowledge_high_risk) {
+      params.set('acknowledge_high_risk', 'true')
+      params.set('reason', ack.reason ?? '')
+    }
+    const query = params.toString()
+    return request<{ run: RunInfo }>(`/tasks/${id}/calibrate${query ? `?${query}` : ''}`, {
+      method: 'POST',
+    })
+  },
+  run: (id: string, options: { skip_calibration?: boolean; force?: boolean } & RiskAck = {}) =>
     request<{ run: RunInfo }>(`/tasks/${id}/run`, {
       method: 'POST',
       body: JSON.stringify({ skip_calibration: false, force: false, ...options }),

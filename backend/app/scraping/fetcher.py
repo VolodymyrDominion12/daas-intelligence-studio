@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 
 FETCH_MAX_BYTES = 6 * 1024 * 1024
 REDIRECT_LIMIT = 4
-ErrorKind = Literal["transient", "blocked", "permanent", "robots", "unsafe", "disabled", "empty"]
+ErrorKind = Literal[
+    "transient", "blocked", "permanent", "robots", "unsafe", "disabled", "empty", "policy"
+]
 
 
 @dataclass(slots=True)

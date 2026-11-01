@@ -23,6 +23,8 @@ class UpdateTaskRequest(BaseModel):
 class RunRequest(BaseModel):
     skip_calibration: bool = False
     force: bool = False
+    acknowledge_high_risk: bool = False
+    reason: str = Field(default="", max_length=500)
 
 
 class EnrichRequest(BaseModel):

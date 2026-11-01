@@ -250,6 +250,13 @@ class PipelineRunner:
                 run_id=ctx.run_id, level="warning",
             )
             return
+        if result.kind == "policy":
+            self.store.complete_job(job["id"], status="skipped", error=result.error)
+            self.store.add_event(
+                task_id, "compliance_blocked", f"Заблоковано політикою джерел: {job['url']}",
+                run_id=ctx.run_id, level="warning", data={"reason": result.error},
+            )
+            return
         ctx.stats.pages_failed += 1
         retryable = result.kind in {"transient"}
         status = self.store.fail_job(job["id"], result.error or result.kind, retryable=retryable)

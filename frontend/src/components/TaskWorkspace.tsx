@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { api } from '../api'
+import { ApiError, api, type RiskAck } from '../api'
 import {
   RUN_LABELS,
   STATUS_LABELS,
@@ -58,11 +58,11 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
     ['new_entity', 'removed_entity', 'field_changed', 'price_drop'].includes(event.type),
   ).length
 
-  const act = async (kind: RunKind) => {
+  const act = async (kind: RunKind, ack: RiskAck = {}) => {
     setBusy(true)
     try {
-      if (kind === 'calibrate') await api.calibrate(task.id)
-      else if (kind === 'collect') await api.run(task.id)
+      if (kind === 'calibrate') await api.calibrate(task.id, ack)
+      else if (kind === 'collect') await api.run(task.id, ack)
       else if (kind === 'enrich') await api.enrich(task.id)
       else if (kind === 'snapshot') await api.snapshot(task.id)
       await onRefresh()
@@ -70,6 +70,13 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
       if (kind === 'calibrate') setTab('calibration')
       if (kind === 'collect') setTab('data')
     } catch (error) {
+      if (error instanceof ApiError && error.status === 428 && !ack.acknowledge_high_risk) {
+        // High-risk source: ask for a reason that goes to the audit log, then retry once.
+        const reason = window.prompt(`${error.message}\n\nПричина запуску:`)?.trim()
+        setBusy(false)
+        if (reason) await act(kind, { acknowledge_high_risk: true, reason })
+        return
+      }
       onToast({ kind: 'error', text: error instanceof Error ? error.message : 'Помилка запуску' })
     } finally {
       setBusy(false)

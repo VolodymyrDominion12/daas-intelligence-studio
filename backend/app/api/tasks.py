@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from ..enrichment.registry import enricher_catalog
 from ..models import EventInfo
+from ..compliance import ComplianceError
 from ..runtime import RunConflict as RunConflictError
 from ..utils import iso
 from .deps import StudioDep
@@ -57,6 +58,8 @@ def list_tasks(studio: StudioDep) -> dict[str, Any]:
 async def create_task(payload: CreateTaskRequest, studio: StudioDep) -> dict[str, Any]:
     try:
         task = await studio.create_task(payload.prompt, payload.seeds, title=payload.title)
+    except ComplianceError:
+        raise
     except Exception as exc:  # noqa: BLE001 - planner errors are user-facing
         raise HTTPException(status_code=400, detail=f"Не вдалося побудувати план: {exc}") from exc
     return {"task": task.model_dump(mode="json"), "spec": task.spec.model_dump(mode="json")}
@@ -140,10 +143,18 @@ def delete_column(task_id: str, key: str, studio: StudioDep) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/calibrate")
-async def calibrate(task_id: str, studio: StudioDep, force: bool = False) -> dict[str, Any]:
+async def calibrate(
+    task_id: str,
+    studio: StudioDep,
+    force: bool = False,
+    acknowledge_high_risk: bool = False,
+    reason: str = Query(default="", max_length=500),
+) -> dict[str, Any]:
     _task_or_404(studio, task_id)
     try:
-        run = await studio.calibrate(task_id, force=force)
+        run = await studio.calibrate(
+            task_id, force=force, acknowledge_high_risk=acknowledge_high_risk, reason=reason
+        )
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"run": run.model_dump(mode="json")}
@@ -154,7 +165,11 @@ async def run_collect(task_id: str, payload: RunRequest, studio: StudioDep) -> d
     _task_or_404(studio, task_id)
     try:
         run = await studio.collect(
-            task_id, force=payload.force, skip_calibration=payload.skip_calibration
+            task_id,
+            force=payload.force,
+            skip_calibration=payload.skip_calibration,
+            acknowledge_high_risk=payload.acknowledge_high_risk,
+            reason=payload.reason,
         )
     except RunConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

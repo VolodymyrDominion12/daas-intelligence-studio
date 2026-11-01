@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from . import __version__
+from .compliance import ComplianceError, PolicyGuardFetcher, assert_logged_out, check_run
 from .config import Settings, get_settings, load_runtime_token
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import OperationalStore
@@ -21,6 +22,7 @@ from .pipeline.planner import Planner
 from .pipeline.runner import PipelineRunner
 from .scraping.fetcher import build_fetcher
 from .storage.raw_cache import RawCache
+from .utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,10 @@ class Studio:
         self.store = OperationalStore(self.paths)
         self.analytics = AnalyticsStore(self.paths)
         self.cache = RawCache(self.paths.raw_cache, self.store)
-        self.fetcher = fetcher or build_fetcher(self.settings, cache=self.cache)
+        # Every request goes through the source-registry guard (P1-04).
+        self.fetcher = PolicyGuardFetcher(
+            fetcher or build_fetcher(self.settings, cache=self.cache), self.store
+        )
         self.router = LLMRouter(self.settings, self.store)
         self.search = build_search(self.settings)
         self.registry = build_registry()
@@ -108,6 +113,9 @@ class Studio:
     async def create_task(
         self, prompt: str, seeds: list[str], *, title: str | None = None
     ) -> TaskInfo:
+        for seed in seeds:
+            if seed and seed.strip():
+                assert_logged_out(seed.strip())
         spec = await self.planner.plan(prompt, seeds, title=title)
         task = self.store.create_task(spec)
         self.store.add_event(
@@ -127,6 +135,9 @@ class Studio:
     def update_task(self, task_id: str, **changes: Any) -> TaskInfo | None:
         if "spec" in changes and isinstance(changes["spec"], dict):
             changes["spec"] = TaskSpec.model_validate(changes["spec"])
+        if isinstance(changes.get("spec"), TaskSpec):
+            for seed in changes["spec"].seeds:
+                assert_logged_out(seed)
         return self.store.update_task(task_id, **changes)
 
     # ------------------------------------------------------------------
@@ -138,12 +149,23 @@ class Studio:
                 return run
         return None
 
-    async def calibrate(self, task_id: str, *, force: bool = False) -> RunInfo:
+    async def calibrate(
+        self,
+        task_id: str,
+        *,
+        force: bool = False,
+        acknowledge_high_risk: bool = False,
+        reason: str = "",
+    ) -> RunInfo:
         task = self._task(task_id)
         self._ensure_idle(task_id, force=force)
         if not task.spec.seeds:
             raise ValueError("Додайте хоча б один seed URL перед калібруванням")
+        acknowledged = self._compliance_gate(
+            task, "calibrate", acknowledge_high_risk=acknowledge_high_risk, reason=reason
+        )
         run = self.store.create_run(task_id, "calibrate", budget_usd=task.spec.limits.budget_usd)
+        self._audit_override(task_id, run.id, acknowledged, reason)
         self.store.update_task(task_id, status="running")
         self.store.add_event(
             task_id, "run_created", "Калібрування: аналізуємо структуру сторінок",
@@ -152,16 +174,28 @@ class Studio:
         self._spawn(run.id, task_id, self.runner.calibrate(task_id, run.id))
         return run
 
-    async def collect(self, task_id: str, *, force: bool = False, skip_calibration: bool = False) -> RunInfo:
+    async def collect(
+        self,
+        task_id: str,
+        *,
+        force: bool = False,
+        skip_calibration: bool = False,
+        acknowledge_high_risk: bool = False,
+        reason: str = "",
+    ) -> RunInfo:
         task = self._task(task_id)
         self._ensure_idle(task_id, force=force)
         if not task.spec.seeds:
             raise ValueError("Додайте хоча б один seed URL")
+        acknowledged = self._compliance_gate(
+            task, "collect", acknowledge_high_risk=acknowledge_high_risk, reason=reason
+        )
         if not skip_calibration and self.store.get_calibration(task_id) is None:
             raise RunConflict(
                 "Спершу запустіть калібрування на тестовій вибірці — це головна економія токенів"
             )
         run = self.store.create_run(task_id, "collect", budget_usd=task.spec.limits.budget_usd)
+        self._audit_override(task_id, run.id, acknowledged, reason)
         self.store.update_task(task_id, status="running")
         self.store.add_event(
             task_id, "run_created", "Збір даних запущено", run_id=run.id,
@@ -252,6 +286,38 @@ class Studio:
         if task is None:
             raise KeyError(f"task not found: {task_id}")
         return task
+
+    def _compliance_gate(
+        self, task: TaskInfo, kind: str, *, acknowledge_high_risk: bool, reason: str
+    ) -> list[str]:
+        try:
+            decision = check_run(
+                self.store,
+                task.spec.seeds,
+                acknowledge_high_risk=acknowledge_high_risk,
+                reason=reason,
+            )
+        except ComplianceError as exc:
+            self.store.add_event(
+                task.id, "compliance_blocked", str(exc), level="error",
+                data={"code": exc.code, "domains": exc.domains, "run_kind": kind},
+            )
+            raise
+        return decision.acknowledged
+
+    def _audit_override(
+        self, task_id: str, run_id: str, acknowledged: list[str], reason: str
+    ) -> None:
+        if not acknowledged:
+            return
+        self.store.add_event(
+            task_id,
+            "compliance_override",
+            "Запуск по джерелах високого ризику підтверджено: " + ", ".join(acknowledged),
+            run_id=run_id,
+            level="warning",
+            data={"domains": acknowledged, "reason": reason.strip(), "at": utcnow().isoformat()},
+        )
 
     def _ensure_idle(self, task_id: str, *, force: bool) -> None:
         if force:
