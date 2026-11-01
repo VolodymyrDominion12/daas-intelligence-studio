@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 
 from . import __version__
+from .compliance import ComplianceError, source_note
 from .config import Settings, get_settings
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import OperationalStore
@@ -183,12 +184,18 @@ def task_show(task_id: str) -> None:
 def calibrate(
     task_id: str,
     wait: Annotated[bool, typer.Option("--wait/--no-wait")] = True,
+    ack_high_risk: Annotated[
+        bool, typer.Option("--ack-high-risk", help="Підтвердити джерела з tos_risk=high")
+    ] = False,
+    reason: Annotated[str, typer.Option(help="Причина підтвердження (піде в журнал аудиту)")] = "",
 ) -> None:
     """Калібрування: тестова вибірка + навчання CSS-схеми."""
     async def run() -> None:
         studio = _studio()
         try:
-            cal_run = await studio.calibrate(task_id)
+            cal_run = await studio.calibrate(
+                task_id, acknowledge_high_risk=ack_high_risk, reason=reason
+            )
             _print_run(cal_run)
             if wait:
                 finished = await studio.wait(cal_run.id)
@@ -212,6 +219,10 @@ def collect(
     task_id: str,
     pages: Annotated[int, typer.Option(help="Ліміт сторінок")] = 0,
     wait: Annotated[bool, typer.Option("--wait/--no-wait")] = True,
+    ack_high_risk: Annotated[
+        bool, typer.Option("--ack-high-risk", help="Підтвердити джерела з tos_risk=high")
+    ] = False,
+    reason: Annotated[str, typer.Option(help="Причина підтвердження (піде в журнал аудиту)")] = "",
 ) -> None:
     """Запустити масовий збір даних."""
     async def run() -> None:
@@ -224,7 +235,9 @@ def collect(
                 spec = task.spec.model_copy(deep=True)
                 spec.limits.max_pages = pages
                 studio.update_task(task_id, spec=spec)
-            run_info = await studio.collect(task_id)
+            run_info = await studio.collect(
+                task_id, acknowledge_high_risk=ack_high_risk, reason=reason
+            )
             _print_run(run_info)
             if wait:
                 finished = await studio.wait(run_info.id)
@@ -297,6 +310,7 @@ def export(
             exports_dir=studio.paths.exports,
             mask_pii=mask,
             limit=limit or None,
+            source_note=source_note(studio.store, task.spec.seeds),
         )
         typer.echo(f"✅ {manifest['file']} ({manifest['rows']} рядків, {manifest['bytes']} B)")
         typer.echo(f"   manifest: {manifest['manifest']}")
@@ -395,6 +409,11 @@ def _guard_cli(fn) -> None:
     except RunConflict as exc:
         typer.echo(f"⚠️  {exc}", err=True)
         raise typer.Exit(code=2) from exc
+    except ComplianceError as exc:
+        typer.echo(f"⛔ {exc}", err=True)
+        if exc.code == "needs_ack":
+            typer.echo('   Повторіть з --ack-high-risk --reason "…"', err=True)
+        raise typer.Exit(code=3) from exc
     except Exception as exc:  # noqa: BLE001 - CLI surface
         typer.echo(f"❌ {type(exc).__name__}: {exc}", err=True)
         raise typer.Exit(code=1) from exc

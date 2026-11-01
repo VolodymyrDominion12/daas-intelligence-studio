@@ -27,7 +27,7 @@ from ..models import (
     TaskInfo,
     TaskSpec,
 )
-from ..utils import iso, json_dumps, json_loads, utcnow
+from ..utils import iso, json_dumps, json_loads, normalize_domain, utcnow
 
 MIGRATIONS: list[tuple[int, str]] = [
     (
@@ -163,6 +163,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         """,
     ),
 ]
+
+
+class ActiveRunError(RuntimeError):
+    """A task already has a queued or running run (raised by an exclusive ``create_run``)."""
+
+    def __init__(self, run_id: str, status: str) -> None:
+        super().__init__(f"Задача вже виконується (run {run_id}, {status})")
+        self.run_id = run_id
+        self.status = status
 
 
 class OperationalStore:
@@ -310,15 +319,39 @@ class OperationalStore:
         budget_usd: float = 0.0,
         stats: RunStats | None = None,
         run_id: str | None = None,
+        exclusive: bool = False,
+        audit: tuple[str, str, str, dict[str, Any]] | None = None,
     ) -> RunInfo:
+        """Insert a queued run.
+
+        ``exclusive`` refuses to start while the task has a queued/running run; the check and the
+        insert share one ``BEGIN IMMEDIATE`` transaction, so concurrent requests (API, CLI, another
+        process) cannot both win. ``audit`` = ``(type, level, message, data)`` is written in the
+        same transaction, so a run never exists without its compliance audit record.
+        """
         run_id = run_id or uuid.uuid4().hex[:12]
         now = iso()
-        with self._lock:
-            self._conn.execute(
+        with self._tx() as conn:
+            if exclusive:
+                active = conn.execute(
+                    "SELECT id, status FROM runs WHERE task_id = ? AND status IN ('queued','running')"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if active is not None:
+                    raise ActiveRunError(active["id"], active["status"])
+            conn.execute(
                 "INSERT INTO runs(id, task_id, kind, status, stats_json, budget_usd, created_at)"
                 " VALUES (?,?,?,?,?,?,?)",
                 (run_id, task_id, kind, "queued", (stats or RunStats()).model_dump_json(), budget_usd, now),
             )
+            if audit is not None:
+                event_type, level, message, data = audit
+                conn.execute(
+                    "INSERT INTO events(task_id, run_id, type, level, message, data_json, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (task_id, run_id, event_type, level, message, json_dumps(data), now),
+                )
         run = self.get_run(run_id)
         assert run is not None
         return run
@@ -707,12 +740,22 @@ class OperationalStore:
 
     # -- source registry --------------------------------------------------
     def get_source_policy(self, domain: str) -> SourcePolicy | None:
-        row = self._one("SELECT payload_json FROM source_registry WHERE domain = ?", (domain,))
+        key = normalize_domain(domain) or domain.strip().lower()
+        row = self._one(
+            "SELECT payload_json FROM source_registry WHERE domain IN (?, ?)"
+            " ORDER BY domain = ? DESC LIMIT 1",
+            (key, domain, key),
+        )
         if not row:
             return None
-        return SourcePolicy.model_validate_json(row["payload_json"])
+        policy = SourcePolicy.model_validate_json(row["payload_json"])
+        policy.domain = key
+        return policy
 
     def upsert_source_policy(self, policy: SourcePolicy) -> None:
+        # One canonical key per host: «WWW.Example.com» and «example.com» are the same source.
+        key = normalize_domain(policy.domain) or policy.domain.strip().lower()
+        policy = policy.model_copy(update={"domain": key})
         with self._lock:
             self._conn.execute(
                 "INSERT INTO source_registry(domain, payload_json, updated_at) VALUES (?,?,?)"

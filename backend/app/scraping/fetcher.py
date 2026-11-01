@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from urllib.parse import urljoin, urlsplit
@@ -71,6 +72,8 @@ class HttpFetcher:
     ) -> None:
         self.settings = settings
         self.cache = cache
+        # Set by compliance.PolicyGuardFetcher: returns a reason if a redirect hop is not allowed.
+        self.redirect_guard: Callable[[str], str | None] | None = None
         self.robots = robots or RobotsGate(settings)
         self.limiter = limiter or DomainRateLimiter(
             max_concurrency=settings.max_concurrency,
@@ -154,6 +157,11 @@ class HttpFetcher:
                         )
                     except UnsafeUrlError as exc:
                         return FetchResult(kind="unsafe", error=str(exc))
+                    if self.redirect_guard is not None:
+                        blocked = self.redirect_guard(current)
+                        if blocked:
+                            return FetchResult(kind="policy", status=response.status_code,
+                                               error=f"redirect: {blocked}")
                     continue
 
                 status_kind = classify_status(response.status_code)

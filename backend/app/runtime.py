@@ -8,10 +8,17 @@ import logging
 from typing import Any
 
 from . import __version__
-from .compliance import ComplianceError, PolicyGuardFetcher, assert_logged_out, check_run
+from .compliance import (
+    ComplianceError,
+    PolicyGuardFetcher,
+    assert_logged_out,
+    check_run,
+    login_violation,
+    run_scope,
+)
 from .config import Settings, get_settings, load_runtime_token
 from .db.duckdb_store import AnalyticsStore
-from .db.sqlite_store import OperationalStore
+from .db.sqlite_store import ActiveRunError, OperationalStore
 from .discovery import build_search
 from .enrichment.registry import build_registry, enricher_catalog
 from .extraction.engine import ExtractionEngine
@@ -117,6 +124,13 @@ class Studio:
             if seed and seed.strip():
                 assert_logged_out(seed.strip())
         spec = await self.planner.plan(prompt, seeds, title=title)
+        # Seeds discovered by search are validated too, before anything is persisted.
+        dropped = [seed for seed in spec.seeds if login_violation(seed)]
+        if dropped:
+            spec.seeds = [seed for seed in spec.seeds if seed not in dropped]
+            spec.assumptions.append(
+                f"Відкинуто {len(dropped)} знайдених URL з токенами доступу (лише публічні сторінки)."
+            )
         task = self.store.create_task(spec)
         self.store.add_event(
             task.id,
@@ -164,14 +178,15 @@ class Studio:
         acknowledged = self._compliance_gate(
             task, "calibrate", acknowledge_high_risk=acknowledge_high_risk, reason=reason
         )
-        run = self.store.create_run(task_id, "calibrate", budget_usd=task.spec.limits.budget_usd)
-        self._audit_override(task_id, run.id, acknowledged, reason)
+        run = self._create_run(
+            task, "calibrate", exclusive=not force, acknowledged=acknowledged, reason=reason
+        )
         self.store.update_task(task_id, status="running")
         self.store.add_event(
             task_id, "run_created", "Калібрування: аналізуємо структуру сторінок",
             run_id=run.id,
         )
-        self._spawn(run.id, task_id, self.runner.calibrate(task_id, run.id))
+        self._spawn(run.id, task_id, self.runner.calibrate(task_id, run.id), acknowledged)
         return run
 
     async def collect(
@@ -194,20 +209,21 @@ class Studio:
             raise RunConflict(
                 "Спершу запустіть калібрування на тестовій вибірці — це головна економія токенів"
             )
-        run = self.store.create_run(task_id, "collect", budget_usd=task.spec.limits.budget_usd)
-        self._audit_override(task_id, run.id, acknowledged, reason)
+        run = self._create_run(
+            task, "collect", exclusive=not force, acknowledged=acknowledged, reason=reason
+        )
         self.store.update_task(task_id, status="running")
         self.store.add_event(
             task_id, "run_created", "Збір даних запущено", run_id=run.id,
             data={"max_pages": task.spec.limits.max_pages},
         )
-        self._spawn(run.id, task_id, self.runner.collect(task_id, run.id))
+        self._spawn(run.id, task_id, self.runner.collect(task_id, run.id), acknowledged)
         return run
 
     async def enrich(self, task_id: str, column_keys: list[str] | None = None) -> RunInfo:
         task = self._task(task_id)
         self._ensure_idle(task_id, force=False)
-        run = self.store.create_run(task_id, "enrich", budget_usd=task.spec.limits.budget_usd)
+        run = self._create_run(task, "enrich", exclusive=True)
         self.store.update_task(task_id, status="running")
         self.store.add_event(
             task_id, "run_created", "Збагачення запущено", run_id=run.id,
@@ -217,9 +233,9 @@ class Studio:
         return run
 
     async def snapshot(self, task_id: str) -> RunInfo:
-        self._task(task_id)
+        task = self._task(task_id)
         self._ensure_idle(task_id, force=False)
-        run = self.store.create_run(task_id, "snapshot")
+        run = self._create_run(task, "snapshot", exclusive=True, budget=False)
         self.store.add_event(
             task_id, "run_created", "Створюємо снапшот та рахуємо зміни", run_id=run.id
         )
@@ -305,19 +321,39 @@ class Studio:
             raise
         return decision.acknowledged
 
-    def _audit_override(
-        self, task_id: str, run_id: str, acknowledged: list[str], reason: str
-    ) -> None:
-        if not acknowledged:
-            return
-        self.store.add_event(
-            task_id,
-            "compliance_override",
-            "Запуск по джерелах високого ризику підтверджено: " + ", ".join(acknowledged),
-            run_id=run_id,
-            level="warning",
-            data={"domains": acknowledged, "reason": reason.strip(), "at": utcnow().isoformat()},
-        )
+    def _create_run(
+        self,
+        task: TaskInfo,
+        kind: str,
+        *,
+        exclusive: bool,
+        acknowledged: list[str] | None = None,
+        reason: str = "",
+        budget: bool = True,
+    ) -> RunInfo:
+        """Create the run atomically with its compliance audit record (if any).
+
+        ``exclusive`` makes the active-run check part of the same SQLite transaction, so two
+        overlapping requests cannot both start a run for one task.
+        """
+        audit = None
+        if acknowledged:
+            audit = (
+                "compliance_override",
+                "warning",
+                "Запуск по джерелах високого ризику підтверджено: " + ", ".join(acknowledged),
+                {"domains": acknowledged, "reason": reason.strip(), "at": utcnow().isoformat()},
+            )
+        try:
+            return self.store.create_run(
+                task.id,
+                kind,
+                budget_usd=task.spec.limits.budget_usd if budget else 0.0,
+                exclusive=exclusive,
+                audit=audit,
+            )
+        except ActiveRunError as exc:
+            raise RunConflict(str(exc)) from exc
 
     def _ensure_idle(self, task_id: str, *, force: bool) -> None:
         if force:
@@ -326,14 +362,23 @@ class Studio:
         if active is not None:
             raise RunConflict(f"Задача вже виконується (run {active.id}, {active.status})")
 
-    def _spawn(self, run_id: str, task_id: str, coro) -> None:
-        job = asyncio.create_task(self._guard(run_id, task_id, coro))
+    def _spawn(
+        self, run_id: str, task_id: str, coro, acknowledged: list[str] | None = None
+    ) -> None:
+        job = asyncio.create_task(
+            self._guard(run_id, task_id, coro, tuple(acknowledged or ()))
+        )
         self._jobs[run_id] = job
         job.add_done_callback(lambda _future: self._jobs.pop(run_id, None))
 
-    async def _guard(self, run_id: str, task_id: str, coro) -> None:
+    async def _guard(
+        self, run_id: str, task_id: str, coro, acknowledged: tuple[str, ...] = ()
+    ) -> None:
         try:
-            await coro
+            # The scope tells the fetch guard which run is fetching and which high-risk
+            # domains were acknowledged for it (contextvars are per asyncio task).
+            with run_scope(task_id, run_id, acknowledged):
+                await coro
         except asyncio.CancelledError:
             logger.info("run %s cancelled", run_id)
             self.store.update_run(
