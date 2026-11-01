@@ -215,6 +215,7 @@ npm run build               # tsc + vite
 | [01. Концепція та архітектура](docs/01_CONCEPT_AND_ARCHITECTURE.md) | початкова ідея, стек, UX |
 | [02. Огляд і покращення](docs/02_CONCEPT_REVIEW_AND_IMPROVEMENTS.md) | критичний розбір, фактчек, P0-ризики, ADR |
 | [03. План і статус](docs/03_IMPLEMENTATION_PLAN.md) | що зроблено, беклог, критерії приймання, обмеження |
+| [04. Парсер маркетплейсів](docs/04_MARKETPLACE_PARSER_CONCEPT.md) | Rozetka/Prom.ua: позиції, картки, продажі — здійсненність і план |
 
 ---
 
