@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..compliance import login_violation
 from ..config import Settings
 from ..db.duckdb_store import AnalyticsStore, dataset_slug, detect_price_fields
 from ..db.sqlite_store import OperationalStore
@@ -250,6 +251,10 @@ class PipelineRunner:
                 run_id=ctx.run_id, level="warning",
             )
             return
+        if result.kind == "policy":
+            # The fetch guard already wrote a redacted compliance_blocked event.
+            self.store.complete_job(job["id"], status="skipped", error=result.error)
+            return
         ctx.stats.pages_failed += 1
         retryable = result.kind in {"transient"}
         status = self.store.fail_job(job["id"], result.error or result.kind, retryable=retryable)
@@ -350,6 +355,8 @@ class PipelineRunner:
         links = extract_links(
             page.html, page.final_url or page.url, same_site=True, limit=10 if empty else 5
         )
+        # Never queue (and so never persist) links that carry credentials or session tokens.
+        links = [link for link in links if login_violation(link) is None]
         if not links:
             return
         queued = self.store.job_counts(ctx.run_id)

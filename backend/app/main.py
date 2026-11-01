@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import data as data_routes
 from .api import tasks as task_routes
+from .compliance import ComplianceError
 from .config import PROJECT_ROOT, Settings, get_settings
 from .runtime import RunConflict, Studio
 from .utils import UnsafeUrlError
@@ -108,6 +109,15 @@ def create_app(settings: Settings | None = None, *, studio_factory=None) -> Fast
     @app.exception_handler(RunConflict)
     async def _conflict(_request: Request, exc: RunConflict) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(ComplianceError)
+    async def _compliance(_request: Request, exc: ComplianceError) -> JSONResponse:
+        # 428 Precondition Required: the run is allowed after an explicit acknowledgement.
+        status = 428 if exc.code == "needs_ack" else 403
+        return JSONResponse(
+            status_code=status,
+            content={"detail": str(exc), "code": exc.code, "domains": exc.domains},
+        )
 
     @app.exception_handler(KeyError)
     async def _missing(_request: Request, exc: KeyError) -> JSONResponse:

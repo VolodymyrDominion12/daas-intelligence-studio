@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from ..compliance import source_note
 from ..enrichment.dedupe import find_duplicates
 from ..models import DuplicateCandidate, SourcePolicy
 from ..storage.backup import create_backup
@@ -120,10 +121,8 @@ def create_export(task_id: str, payload: ExportRequest, studio: StudioDep) -> di
             exports_dir=studio.paths.exports,
             mask_pii=payload.mask_pii,
             limit=payload.limit,
-            source_note="; ".join(
-                f"{policy.domain} ({policy.tos_risk}/{policy.license})"
-                for policy in task.spec.source_policy.values()
-            ),
+            # Live registry, not the policy snapshot taken when the task was planned.
+            source_note=source_note(studio.store, task.spec.seeds),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Експорт не вдався: {exc}") from exc
@@ -210,6 +209,9 @@ def list_sources(studio: StudioDep) -> dict[str, Any]:
 
 @router.put("/sources/{domain}")
 def update_source(domain: str, payload: SourcePolicyRequest, studio: StudioDep) -> dict[str, Any]:
+    domain = normalize_domain(domain) or domain.strip().lower()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Некоректний домен")
     policy = SourcePolicy(
         domain=domain,
         tos_risk=payload.tos_risk,  # type: ignore[arg-type]
