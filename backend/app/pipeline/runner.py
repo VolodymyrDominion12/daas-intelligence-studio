@@ -55,6 +55,11 @@ class RunContext:
     strategies: Counter = field(default_factory=Counter)
     notes: list[str] = field(default_factory=list)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # tombstone bookkeeping (collect runs only)
+    seen_keys: set[str] = field(default_factory=set)
+    crawled_domains: set[str] = field(default_factory=set)
+    empty_sources: set[str] = field(default_factory=set)
+    full_crawl: bool = False
 
 
 class PipelineRunner:
@@ -206,6 +211,7 @@ class PipelineRunner:
                 )
                 self.store.heartbeat(ctx.worker)
 
+            self._apply_tombstones(ctx)
             await self._finish_dataset(ctx, status_override=None)
         except Exception as exc:
             logger.exception("collect failed")
@@ -238,6 +244,7 @@ class PipelineRunner:
         ctx.stats.pages_fetched += 1
         if page.from_cache:
             ctx.stats.pages_cached += 1
+        ctx.crawled_domains.add(normalize_domain(page.final_url or page.url))
         await self._extract_page(page, job, ctx)
         self.store.complete_job(job["id"], status="done")
 
@@ -305,6 +312,8 @@ class PipelineRunner:
 
         records = self.engine.to_records(outcome, page, spec)
         if not records:
+            # A page that yields nothing may be a broken layout: never tombstone its records.
+            ctx.empty_sources.update({page.url, page.final_url or page.url})
             level = "warning" if not outcome.warnings else "debug"
             self.store.add_event(
                 ctx.task.id, "no_records", f"0 записів: {page.final_url or page.url}",
@@ -315,6 +324,7 @@ class PipelineRunner:
             return
 
         for record in records:
+            ctx.seen_keys.add(record.record_key)
             record = self._merge_with_existing(record, ctx)
             self.analytics.append_records(
                 ctx.dataset_id, ctx.version, ctx.run_id, [record]
@@ -603,6 +613,8 @@ class PipelineRunner:
             "llm_spend_usd": round(ctx.budget.spent_usd, 4),
             "fill_rates": fill,
             "changes": len(changes),
+            "full_crawl": ctx.full_crawl,
+            "removed": ctx.stats.records_removed,
             "notes": ctx.notes[:20],
             "sources": unique(
                 [normalize_domain(seed) for seed in ctx.spec.seeds if normalize_domain(seed)]
@@ -631,12 +643,84 @@ class PipelineRunner:
                 "rows": row_count,
                 "new": ctx.stats.records_new,
                 "updated": ctx.stats.records_updated,
+                "removed": ctx.stats.records_removed,
                 "failed_jobs": counts["failed"],
                 "llm_usd": round(ctx.budget.spent_usd, 4),
             },
         )
         if changes:
             self._emit_changes(ctx, changes)
+
+    def _apply_tombstones(self, ctx: RunContext) -> None:
+        """Mark records that a *complete* crawl no longer finds as removed (P1-03).
+
+        Conservative by design — a false «removed» is worse than a late one:
+
+        * only after a full crawl: not cancelled, no page/LLM limit, no failed or skipped jobs;
+        * only for domains actually crawled in this run;
+        * never for records whose source page was fetched but yielded nothing (broken layout?);
+        * only after ``tombstone_after_misses`` consecutive full crawls without the record;
+        * never more than ``tombstone_max_ratio`` of the dataset at once.
+        """
+        counts = self.store.job_counts(ctx.run_id)
+        incomplete = [
+            note for note in ctx.notes
+            if note.startswith(("run cancelled", "page limit", "llm limit", "queue stalled"))
+        ]
+        ctx.full_crawl = not incomplete and not counts["failed"] and not counts["skipped"]
+        if not ctx.full_crawl:
+            reason = incomplete[0] if incomplete else (
+                f"{counts['failed']} failed / {counts['skipped']} skipped pages"
+            )
+            self.store.add_event(
+                ctx.task.id, "tombstones_skipped",
+                f"Видалені записи не позначались: неповний прохід ({reason})",
+                run_id=ctx.run_id, level="debug",
+            )
+            return
+
+        last_seen = self.analytics.last_versions(ctx.dataset_id)
+        sources = self.analytics.current_sources(ctx.dataset_id)
+        full_versions = sorted(
+            int(item["version"])
+            for item in self.store.dataset_versions(ctx.dataset_id)
+            if item["manifest"].get("full_crawl")
+        )
+        threshold = self.settings.tombstone_after_misses
+        candidates: list[str] = []
+        for key, version in last_seen.items():
+            if key in ctx.seen_keys or version >= ctx.version:
+                continue
+            source = sources.get(key, "")
+            if normalize_domain(source) not in ctx.crawled_domains or source in ctx.empty_sources:
+                continue
+            # misses = this run + earlier full crawls since the record was last observed
+            misses = 1 + sum(1 for v in full_versions if version < v < ctx.version)
+            if misses >= threshold:
+                candidates.append(key)
+        if not candidates:
+            return
+
+        total = len(last_seen)
+        if total and len(candidates) / total > self.settings.tombstone_max_ratio:
+            self.store.add_event(
+                ctx.task.id, "tombstones_suspicious",
+                f"Не позначено {len(candidates)} з {total} записів як видалені: це більше "
+                f"{self.settings.tombstone_max_ratio:.0%} датасету — схоже на зламаний сайт "
+                "або верстку. Перевірте джерело.",
+                run_id=ctx.run_id, level="warning",
+                data={"candidates": len(candidates), "total": total},
+            )
+            return
+
+        removed = self.analytics.tombstone(ctx.dataset_id, ctx.version, ctx.run_id, candidates)
+        ctx.stats.records_removed += removed
+        self.store.add_event(
+            ctx.task.id, "records_removed",
+            f"Позначено як видалені: {removed} записів (не знайдено при повному проході)",
+            run_id=ctx.run_id, level="info",
+            data={"keys": candidates[:50], "count": removed},
+        )
 
     async def _write_snapshot_and_diff(self, ctx: RunContext, version: int) -> list:
         previous_versions = [

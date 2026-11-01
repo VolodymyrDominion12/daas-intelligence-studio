@@ -201,7 +201,7 @@ npm run build               # tsc + vite
 ## Обмеження v0.1
 
 Детально — у [`docs/03_IMPLEMENTATION_PLAN.md`](docs/03_IMPLEMENTATION_PLAN.md#7-відомі-обмеження-v01-чесно).
-Коротко: немає tombstones для видалених записів, gold-set метрик точності, merge/unmerge дублікатів,
+Коротко: немає gold-set метрик точності, merge/unmerge дублікатів,
 планувальника, проксі-пулу та важких рушіїв (Playwright/Camoufox) — це наступні етапи.
 
 Одна студія на сховище: запущений `daas serve` тримає DuckDB, тому CLI-команди, що пишуть,

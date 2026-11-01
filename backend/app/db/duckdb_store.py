@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS record_versions (
     payload         JSON,
     provenance      JSON,
     observed_at     TIMESTAMP NOT NULL,
+    deleted         BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (dataset_id, record_key, revision)
 );
 
@@ -51,6 +52,9 @@ CREATE TABLE IF NOT EXISTS quarantine (
 );
 """
 
+
+# A tombstone is a regular version row with ``deleted = TRUE``: history stays append-only, and
+# the record disappears from the current view, snapshots and diffs (→ ``removed_entity``).
 CURRENT_VIEW = """
 CREATE OR REPLACE VIEW current_records AS
 SELECT dataset_id, record_key, dataset_version, payload, provenance, source_url, observed_at
@@ -60,7 +64,7 @@ FROM (
     ) AS rn
     FROM record_versions
 )
-WHERE rn = 1;
+WHERE rn = 1 AND NOT COALESCE(deleted, FALSE);
 """
 
 NUMERIC_DTYPES = {"number", "integer"}
@@ -79,9 +83,33 @@ class AnalyticsStore:
             self._con.execute("SET preserve_insertion_order=true")
             if not read_only:
                 self._con.execute(SCHEMA)
+                self._migrate()
                 self._con.execute(CURRENT_VIEW)
 
     # -- infrastructure ---------------------------------------------------
+    def _migrate(self) -> None:
+        """Forward-only migrations for files created by older versions.
+
+        DuckDB refuses ``ALTER TABLE`` on a table that has an index, so the index is dropped and
+        recreated around the change.
+        """
+        columns = {
+            row[0]
+            for row in self._con.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'record_versions'"
+            ).fetchall()
+        }
+        if "deleted" not in columns:
+            self._con.execute("DROP INDEX IF EXISTS idx_record_versions_lookup")
+            self._con.execute(
+                "ALTER TABLE record_versions ADD COLUMN deleted BOOLEAN DEFAULT FALSE"
+            )
+            self._con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_record_versions_lookup"
+                " ON record_versions(dataset_id, record_key, revision)"
+            )
+
     def close(self) -> None:
         with self._lock:
             self._con.close()
@@ -135,6 +163,55 @@ class AnalyticsStore:
                 rows,
             )
         return len(rows)
+
+    def tombstone(
+        self,
+        dataset_id: str,
+        dataset_version: int,
+        run_id: str | None,
+        record_keys: list[str],
+    ) -> int:
+        """Mark records as removed by appending a ``deleted`` version (last payload is kept)."""
+        if not record_keys:
+            return 0
+        now = datetime.now(UTC).replace(tzinfo=None)
+        keys = list(dict.fromkeys(record_keys))
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) FROM current_records WHERE dataset_id = ?"
+                " AND record_key IN (SELECT UNNEST(?::VARCHAR[]))",
+                [dataset_id, keys],
+            ).fetchone()
+            self._con.execute(
+                """
+                INSERT INTO record_versions
+                    (dataset_id, record_key, dataset_version, run_id, source_url,
+                     content_hash, payload, provenance, observed_at, deleted)
+                SELECT dataset_id, record_key, ?, ?, source_url, NULL, payload, provenance, ?, TRUE
+                FROM current_records
+                WHERE dataset_id = ? AND record_key IN (SELECT UNNEST(?::VARCHAR[]))
+                """,
+                [dataset_version, run_id, now, dataset_id, keys],
+            )
+        return int(row[0]) if row else 0
+
+    def last_versions(self, dataset_id: str) -> dict[str, int]:
+        """Current (non-removed) record → dataset version in which it was last observed."""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT record_key, dataset_version FROM current_records"
+                " WHERE dataset_id = ?",
+                [dataset_id],
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
+    def current_sources(self, dataset_id: str) -> dict[str, str]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT record_key, source_url FROM current_records WHERE dataset_id = ?",
+                [dataset_id],
+            ).fetchall()
+        return {row[0]: row[1] or "" for row in rows}
 
     def quarantine(
         self, dataset_id: str, run_id: str | None, source_url: str, reason: str, payload: dict
@@ -229,8 +306,8 @@ class AnalyticsStore:
     def record_history(self, dataset_id: str, record_key: str, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._con.execute(
-                "SELECT dataset_version, revision, payload, provenance, source_url, observed_at "
-                "FROM record_versions WHERE dataset_id = ? AND record_key = ? "
+                "SELECT dataset_version, revision, payload, provenance, source_url, observed_at, "
+                "COALESCE(deleted, FALSE) FROM record_versions WHERE dataset_id = ? AND record_key = ? "
                 "ORDER BY revision DESC LIMIT ?",
                 [dataset_id, record_key, limit],
             ).fetchall()
@@ -242,6 +319,7 @@ class AnalyticsStore:
                 "provenance": json_loads(row[3], {}),
                 "source_url": row[4],
                 "observed_at": row[5],
+                "deleted": bool(row[6]),
             }
             for row in rows
         ]
@@ -301,10 +379,10 @@ class AnalyticsStore:
             rows = self._con.execute(
                 """
                 SELECT record_key, payload FROM (
-                    SELECT record_key, payload,
+                    SELECT record_key, payload, deleted,
                            row_number() OVER (PARTITION BY record_key ORDER BY revision DESC) AS rn
                     FROM record_versions WHERE dataset_id = ? AND dataset_version <= ?
-                ) WHERE rn = 1
+                ) WHERE rn = 1 AND NOT COALESCE(deleted, FALSE)
                 """,
                 [dataset_id, version],
             ).fetchall()

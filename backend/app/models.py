@@ -225,6 +225,7 @@ class RunStats(BaseModel):
     records_new: int = 0
     records_updated: int = 0
     records_quarantined: int = 0
+    records_removed: int = 0
     enrichments_run: int = 0
     llm_calls: int = 0
     llm_usd: float = 0.0
