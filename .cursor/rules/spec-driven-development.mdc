@@ -1,0 +1,17 @@
+---
+description: Spec-Driven Development — обов'язковий процес для всіх змін у DaaS Intelligence Studio
+globs:
+alwaysApply: true
+---
+
+Дотримуйся `AGENTS.md` у корені репозиторію. Ключові правила:
+
+1. Специфікації в `specs/` — джерело правди. Перед зміною коду прочитай `specs/constitution.md` і
+   спеку-власника файлу в `specs/capabilities/` (рядок «Код»).
+2. Нова фіча, зміна API/моделі/БД/CLI, комплаєнс, безпека, PII → повний цикл
+   `specs/changes/NNN-slug/{spec,plan,tasks}.md` за шаблонами з `specs/_templates/`.
+   Баг, де код суперечить спеці → тест + фікс + посилання на тест у вимозі.
+3. Тест — до реалізації. Кожна `REQ-…` має `**Перевірка:** \`tests/<file>.py::<test>\``.
+4. Після реалізації синхронізуй `specs/capabilities/*.md`, онови `docs/03`, архівуй зміну.
+5. Тести офлайн; LLM — лише guarded fallback; комплаєнс і маскування PII не послаблюються.
+6. Перевірки: `make specs-check test lint build`.

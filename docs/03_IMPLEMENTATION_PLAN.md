@@ -298,13 +298,19 @@ uv run ruff check app tests
 
 ## 9. Definition of Done для кожної фічі
 
+> З листопада 2026 проєкт працює за **Spec-Driven Development**: процес — [`specs/README.md`](../specs/README.md),
+> принципи — [`specs/constitution.md`](../specs/constitution.md), інструкції агентам — [`AGENTS.md`](../AGENTS.md).
+> Фічі з беклогу нижче стартують як `specs/changes/NNN-slug/` (spec → plan → tasks).
+
+0. Спека в `specs/` описує поведінку; кожна вимога має посилання на тест; після злиття
+   `specs/capabilities/` синхронізовано (`make specs-check`).
 1. Типізовані межі (Pydantic) і обробка помилок із причиною.
 2. Подія в журналі для всього, що змінює дані.
 3. Міграція схеми (SQLite/DuckDB), якщо додається стан.
 4. Мінімум один тест (офлайн) на щасливий шлях і один — на відмову.
 5. Оновлений UI-стан (порожній/помилка/завантаження).
 6. Запис у цьому документі або в `02` (ADR), якщо рішення архітектурне.
-7. `ruff`, `pytest`, `npm run build` зелені.
+7. `ruff`, `pytest` (включно з `test_specs_traceability.py`), `npm run build` зелені.
 
 ---
 

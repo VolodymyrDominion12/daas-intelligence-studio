@@ -172,6 +172,9 @@ uv run ruff check app tests
 
 cd ../frontend
 npm run build               # tsc + vite
+
+cd ..
+make specs-check            # спеки ↔ тести ↔ модулі
 ```
 
 Тести побудовані на локальних HTML-фікстурах (`backend/tests/fixtures/`) і `FixtureFetcher`:
@@ -209,10 +212,24 @@ npm run build               # tsc + vite
 
 ---
 
+## Як ми розробляємо: Spec-Driven Development
+
+Специфікації в [`specs/`](specs/README.md) — джерело правди про поведінку системи. Будь-яка зміна
+поведінки починається зі спеки (`specs/changes/NNN-slug/`: spec → plan → tasks), а після злиття
+[`specs/capabilities/`](specs/README.md#4-індекс-живих-спек) знову описують фактичну поведінку коду.
+Кожна вимога `REQ-…` посилається на тест; `make specs-check` (і CI) це перевіряє.
+
+- Процес і формат: [`specs/README.md`](specs/README.md)
+- Принципи: [`specs/constitution.md`](specs/constitution.md)
+- Інструкції для AI-агентів (Claude Code, Codex, Cursor, Copilot, Gemini): [`AGENTS.md`](AGENTS.md)
+
+---
+
 ## Документація
 
 | Документ | Про що |
 |:---|:---|
+| [Specs](specs/README.md) | живі специфікації (as-built), конституція, процес SDD |
 | [00. Попит на дані](docs/00_MARKET_DEMAND.md) | дослідження ринку: за які дані платять і чому |
 | [01. Концепція та архітектура](docs/01_CONCEPT_AND_ARCHITECTURE.md) | початкова ідея, стек, UX |
 | [02. Огляд і покращення](docs/02_CONCEPT_REVIEW_AND_IMPROVEMENTS.md) | критичний розбір, фактчек, P0-ризики, ADR |
