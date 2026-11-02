@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help setup backend-setup frontend-setup test lint fmt build demo serve doctor clean
+.PHONY: help setup backend-setup frontend-setup test specs-check lint fmt build demo serve doctor clean
 
 help: ## Показати команди
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -14,8 +14,11 @@ backend-setup: ## Python-залежності (uv)
 frontend-setup: ## Node-залежності (React/Vite)
 	cd frontend && npm install
 
-test: ## Тести backend (офлайн)
+test: ## Тести backend (офлайн, включно зі specs-check)
 	cd backend && uv run pytest -q
+
+specs-check: ## SDD: спеки ↔ тести ↔ модулі (specs/README.md §7)
+	cd backend && uv run pytest -q --noconftest tests/test_specs_traceability.py
 
 lint: ## ruff + TypeScript
 	cd backend && uv run ruff check app tests
