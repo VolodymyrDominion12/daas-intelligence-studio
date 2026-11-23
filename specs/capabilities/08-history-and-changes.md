@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`) |
-| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes` |
-| **CLI** | `daas snapshot <id>`, `daas changes <id>` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py` |
-| **Джерела** | ADR-02, ADR-05, `docs/03` §3.3 (P1-03) |
-| **Статус** | as-built (P1-03 ✅) |
+| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`) |
+| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/eval` |
+| **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|delete`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
+| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/05` §5 (D-01) |
+| **Статус** | as-built (P1-01 ✅, P1-03 ✅, D-01 ✅) |
 
 ## 1. Призначення
 Історія, яку конкурент не спарсить заднім числом: append-only версії кожного запису, поточний стан,
@@ -135,6 +135,69 @@ Tombstone **ПОВИНЕН** ставитися лише якщо поточна
 `deleted`, обходячи заборону DuckDB на `ALTER` таблиці з індексом).
 - **Перевірка:** `tests/test_tombstones.py::test_old_database_is_migrated`
 
-## 7. Відкриті питання
+## 7. Вимоги — доставка дельти та алерти (`D-01`)
+
+### REQ-DEL-001 — Керування підписками на доставку дельти (API і CLI)
+Система **ПОВИННА** дозволяти створювати, переглядати, оновлювати, тестувати й видаляти підписки на
+доставку для конкретної задачі (канали `webhook` або `telegram`, фільтри `event_types`, `keywords`,
+`min_amount`, `max_amount`, `notify_on_error`, прапор `enabled`, опційний секрет підпису webhook).
+Небезпечні webhook URL (локальні/приватні адреси без дозволу або URL із обліковими даними)
+**ПОВИННІ** відхилятися (HTTP 400 / 403). Секрет підпису **НЕ ПОВИНЕН** повертатися відкритим текстом
+у відповідях API чи подіях. Створення, оновлення і видалення підписки пишуть події
+`subscription_created`, `subscription_updated`, `subscription_deleted`.
+- **Перевірка:** `tests/test_delivery.py::test_subscription_crud_ssrf_and_secret_masking`,
+  `tests/test_delivery.py::test_cli_notify_commands`
+
+### REQ-DEL-002 — Детермінована фільтрація, маскування PII та форматування повідомлень
+Перед відправленням дельти система **ПОВИННА**:
+- відбирати лише зміни увімкнених підписок, що відповідають усім заданим фільтрам (`event_types`,
+  регістронезалежні `keywords` у записі, `min_amount` / `max_amount`);
+- безумовно приховувати/маскувати значення колонок із `pii="personal"` перед виходом у будь-який
+  зовнішній канал (`[redacted]`);
+- для `webhook` формувати JSON-пакет дельти (і заголовок `X-Daas-Signature: sha256=...` за наявності
+  секрету), для `telegram` — безпечно екрановане HTML-повідомлення через Telegram Bot API.
+- **Перевірка:** `tests/test_delivery.py::test_delta_filtering_pii_redaction_and_hmac`
+
+### REQ-DEL-003 — Ідемпотентна дедуплікація, повторні спроби, SSRF на редиректі та алерти власнику
+Система **ПОВИННА**:
+- гарантувати, що кожна подія зміни версії або службовий алерт доставляються по конкретній підписці
+  **щонайбільше один раз** (персистентний журнал дедуплікації `delivery_log` переживає перезапуск);
+- виконувати повторні спроби (до налаштованого ліміту) при мережевих помилках / HTTP `429` / `5xx`,
+  не повторювати `4xx` (крім `429`) і блокувати небезпечні URL перед кожним запитом без автоматичного
+  слідування редиректам;
+- при `notify_on_error=true` надсилати службовий алерт власнику, якщо запуск завершився з `failed` або
+  дав 0 записів;
+- фіксувати результат подіями `delivery_sent` або `delivery_failed` (`warning`, без токенів/секретів
+  у тексті), не зриваючи фіксацію самого збору даних.
+- **Перевірка:** `tests/test_delivery.py::test_delivery_retries_dedup_and_owner_error_alerts`
+
+## 8. Вимоги — якість даних та офлайн gold-set eval (`P1-01`)
+
+### REQ-QUAL-001 — Автоматичні перевірки якості після прогону
+Після завершення збору або збагачення система **ПОВИННА** детерміновано перевіряти:
+- падіння кількості записів (або спостережених записів при повному проході) відносно попередньої
+  версії більше ніж на `DAAS_QUALITY_MAX_DROP_RATIO` (`0.5`);
+- заповненість обов'язкових не-AI колонок (`required=true`) нижче
+  `DAAS_QUALITY_MIN_REQUIRED_FILL_PCT` (`80.0%`).
+Звіт (`QualityChecksReport`) **ПОВИНЕН** записуватися в `manifest.quality_checks` версії датасету.
+При порушенні (`passed=false`) система пише подію `quality_warning` (`warning`) і надсилає алерт
+власнику (`kind="quality_warning"` підписникам з `notify_on_error=true`), не відкочуючи й не
+зриваючи фіксацію зібраних записів.
+- **Перевірка:** `tests/test_quality.py::test_post_run_quality_guards_pass_and_warn`,
+  `tests/test_quality.py::test_quality_warning_sends_owner_alert`
+
+### REQ-QUAL-002 — Офлайн gold-set eval та поріг регресії
+Система **ПОВИННА** надавати детермінований офлайн eval-харнес (`run_gold_eval`) для HTML та JSON API
+кейсів (без мережевих запитів):
+- обчислювати `precision`, `recall`, `f1`, `coverage`, `llm_fallback_pct` і `usd_per_1k_records`;
+- перевіряти поріг `f1 >= min_f1` (за замовчуванням `DAAS_EVAL_MIN_F1 = 0.8`);
+- зберігати результат у `manifest.eval` останньої версії датасету та писати подію `eval_completed`
+  (без витоку сирих PII-значень);
+- надавати `POST /api/tasks/{id}/eval` (inline-кейси або безпечне ім'я пресету без path traversal)
+  та CLI `daas eval --task <id> --gold <path> [--min-f1 ...]` (код виходу `1` при `passed=false`).
+- **Перевірка:** `tests/test_quality.py::test_gold_eval_api_json_and_html_regression_gate`,
+  `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes`
+
+## 9. Відкриті питання
 - Невалідний ключ у `f_<key>` дає `ValueError` у сховищі → **HTTP 500** на API (немає мапінгу
   `ValueError → 400`). Має бути 400 «некоректна колонка» — потрібен тест на рівні API і фікс.

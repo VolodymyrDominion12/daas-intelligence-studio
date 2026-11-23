@@ -16,7 +16,7 @@ export type DType =
   | 'array'
 
 export type Pii = 'none' | 'business_contact' | 'personal'
-export type Method = 'json_ld' | 'css' | 'regex' | 'llm' | 'enrichment' | 'manual' | 'merge'
+export type Method = 'json_ld' | 'css' | 'regex' | 'llm' | 'enrichment' | 'manual' | 'merge' | 'api_json'
 export type RunKind = 'calibrate' | 'collect' | 'enrich' | 'snapshot' | 'prepare'
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'partial'
 
@@ -33,6 +33,19 @@ export interface FieldSpec {
   attr: string | null
   prompt: string | null
   enrichment: string | null
+}
+
+export interface ApiSourceSpec {
+  items_path: string
+  id_path: string
+  next_page_path: string | null
+  cursor_path: string | null
+  cursor_param: string
+  detail_url_template: string | null
+  record_url_template: string | null
+  field_map: Record<string, string>
+  incremental: boolean
+  headers: Record<string, string>
 }
 
 export interface EnrichmentSpec {
@@ -67,7 +80,8 @@ export interface TaskSpec {
   locale: string
   columns: FieldSpec[]
   seeds: string[]
-  extraction: 'auto' | 'json_ld' | 'css' | 'llm'
+  extraction: 'auto' | 'json_ld' | 'css' | 'llm' | 'api_json'
+  api_source?: ApiSourceSpec | null
   enrichment: EnrichmentSpec[]
   limits: Limits
   rationale: string
@@ -278,6 +292,7 @@ export interface Capabilities {
   storage: string
   budget_usd_default: number
   max_pages_default: number
+  scheduler_enabled?: boolean
 }
 
 export interface Overview {
@@ -355,4 +370,94 @@ export interface SourcePolicyView {
   notes: string
   allowed_fields: string[]
   reviewed_at: string | null
+}
+
+export interface ScheduleInfo {
+  task_id: string
+  cron: string
+  enabled: boolean
+  catch_up: boolean
+  acknowledge_high_risk: boolean
+  reason: string
+  next_run_at: string | null
+  last_run_at: string | null
+  last_run_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type DeliveryChannel = 'webhook' | 'telegram'
+
+export interface DeliveryFilters {
+  event_types: string[]
+  keywords: string[]
+  min_amount: number | null
+  max_amount: number | null
+  notify_on_error: boolean
+}
+
+export interface SubscriptionView {
+  id: string
+  task_id: string
+  name: string
+  channel: DeliveryChannel
+  target: string
+  has_secret: boolean
+  filters: DeliveryFilters
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface QualityCheckIssue {
+  code: 'row_count_drop' | 'required_field_empty'
+  severity: 'warning' | 'error'
+  field: string | null
+  message: string
+  metric: number
+  threshold: number
+}
+
+export interface QualityChecksReport {
+  passed: boolean
+  row_count: number
+  observed_count: number | null
+  previous_row_count: number | null
+  drop_ratio: number | null
+  issues: QualityCheckIssue[]
+}
+
+export interface EvalFieldMetrics {
+  precision: number
+  recall: number
+  f1: number
+  coverage: number
+  tp: number
+  fp: number
+  fn: number
+}
+
+export interface EvalReport {
+  gold_name: string
+  passed: boolean
+  min_f1: number
+  precision: number
+  recall: number
+  f1: number
+  coverage: number
+  cases: number
+  records_expected: number
+  records_extracted: number
+  llm_fallback_pct: number
+  usd_per_1k_records: number
+  dataset_version: number | null
+  evaluated_at: string
+  fields: Record<string, EvalFieldMetrics>
+}
+
+export interface GoldCaseInput {
+  url: string
+  content: string
+  content_type?: 'auto' | 'html' | 'json'
+  expected: Record<string, unknown>[]
 }

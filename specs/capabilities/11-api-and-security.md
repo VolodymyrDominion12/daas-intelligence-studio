@@ -3,7 +3,7 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
 | **Джерела** | ADR-08, ADR-10 |
 | **Статус** | as-built v0.1 |
 
@@ -28,6 +28,12 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | POST | `/api/tasks/{id}/snapshot` | снапшот + diff | 08 |
 | GET | `/api/tasks/{id}/runs`, `/api/runs/{id}` | запуски (+ лічильники задач черги) | 04 |
 | POST | `/api/runs/{id}/cancel` | скасування | 04 |
+| GET | `/api/schedules` | список налаштованих розкладів | 04 |
+| GET/PUT/DELETE | `/api/tasks/{id}/schedule` | перегляд / збереження / видалення cron-розкладу (`ScheduleRequest`) | 04 |
+| GET/POST | `/api/tasks/{id}/subscriptions` | список / створення підписок доставки (`SubscriptionView`, без `secret`) | 08 |
+| PATCH/DELETE | `/api/tasks/{id}/subscriptions/{sub_id}` | оновлення / видалення підписки доставки | 08 |
+| POST | `/api/tasks/{id}/subscriptions/{sub_id}/test` | тестове сповіщення у вибраний канал | 08 |
+| POST | `/api/tasks/{id}/eval` | офлайн оцінка витягування на gold-set (`EvalRequest` → `EvalReport`) | 08 |
 | GET | `/api/tasks/{id}/events`, `/events/stream`, `/changes` | журнал, SSE, зміни | 04, 08 |
 | GET | `/api/tasks/{id}/dataset`, `/records`, `/records/{key}` | датасет, записи, історія запису | 08 |
 | GET | `/api/tasks/{id}/duplicates` | кандидати на дублікати | 07 |

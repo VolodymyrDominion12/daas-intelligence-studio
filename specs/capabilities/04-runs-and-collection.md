@@ -2,11 +2,11 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/runtime.py` (`Studio`), `backend/app/pipeline/runner.py` (`PipelineRunner.collect`, `_process_job*`, `_process_api_list`, `_process_api_detail`, `_extract_page`, `_expand`, `_heal`, `_finish_dataset`), `backend/app/db/sqlite_store.py` (`runs`, `jobs`, `events`, `llm_calls`, `api_state`) |
-| **API** | `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/cancel`, `GET /api/tasks/{id}/events[?after]`, `GET /api/tasks/{id}/events/stream` |
-| **CLI** | `daas collect <id> [--pages N] [--ack-high-risk --reason]` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py` |
-| **Джерела** | ADR-02, `docs/03` §2 |
+| **Код** | `backend/app/runtime.py` (`Studio`), `backend/app/pipeline/runner.py` (`PipelineRunner.collect`, `_process_job*`, `_process_api_list`, `_process_api_detail`, `_extract_page`, `_expand`, `_heal`, `_finish_dataset`), `backend/app/pipeline/scheduler.py` (`TaskScheduler`, `parse_cron`, `validate_cron`, `next_cron_after`), `backend/app/db/sqlite_store.py` (`runs`, `jobs`, `events`, `llm_calls`, `api_state`, `schedules`) |
+| **API** | `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/cancel`, `GET /api/tasks/{id}/events[?after]`, `GET /api/tasks/{id}/events/stream`, `GET/PUT/DELETE /api/tasks/{id}/schedule`, `GET /api/schedules` |
+| **CLI** | `daas collect <id> [--pages N] [--ack-high-risk --reason]`, `daas schedule set\|show\|list\|delete` |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py` |
+| **Джерела** | ADR-02, `docs/03` §2, `docs/03` §3.3 |
 | **Статус** | as-built v0.1 |
 
 ## 1. Призначення
@@ -141,6 +141,28 @@ URL з обліковими даними.
 дозволяти запуск збору зі статусу `draft` без попереднього калібрування і без `skip_calibration=true`,
 не порушуючи правило 409 для звичайних HTML-задач.
 - **Перевірка:** `tests/test_open_api_source.py::test_api_collection_pagination_cursor_and_failure_safety`
+
+### REQ-RUN-040 — Конфігурація та валідація cron-розкладу на задачу
+Система **ПОВИННА** дозволяти створювати, оновлювати, переглядати та видаляти cron-розклад
+для задачі (5-польовий cron у UTC або `@hourly`, `@daily`, `@weekly`, прапори `enabled` і
+`catch_up`, опційне підтвердження `high`-ризику з причиною ≥ 10 символів). Невалідний cron або
+відсутня причина підтвердження **ПОВИННІ** відхилятися (HTTP 422 / 400); зміни пишуть події
+`schedule_updated` / `schedule_deleted`.
+- **Перевірка:** `tests/test_scheduler.py::test_cron_validation_and_schedule_crud_api`
+
+### REQ-RUN-041 — Автоматичний запуск за розкладом і захист від накладання
+Вбудований планувальник **ПОВИНЕН** запускати `collect` для увімкнених прострочених розкладів
+(`next_run_at <= now`): пропускати активний запуск (`schedule_skipped`, `reason="active_run"`),
+блокувати порушення комплаєнсу або брак калібрування (`schedule_blocked`, `level="warning"`) і в
+обох випадках переносити `next_run_at > now` без зациклення; при успішному запуску — оновлювати
+`last_run_at`/`last_run_id`, пересувати `next_run_at > now` і писати `schedule_triggered`.
+- **Перевірка:** `tests/test_scheduler.py::test_scheduler_triggers_skips_active_and_respects_compliance`
+
+### REQ-RUN-042 — Доганяючий прогін після простою (`catch_up`)
+При запізненні більше ніж на 120 секунд: `catch_up=true` виконує **рівно один** доганяючий
+запуск (`data.catch_up=true`) і пересуває `next_run_at > now`; `catch_up=false` пропускає слот із
+подією `schedule_skipped` (`reason="missed_no_catchup"`) без створення запуску.
+- **Перевірка:** `tests/test_scheduler.py::test_scheduler_catch_up_and_missed_slot_policy`
 
 ## 5. Спостережувана поведінка / відкриті питання
 - Після вичерпання `DAAS_MAX_LLM_CALLS_PER_RUN` подія `llm_limit` пишеться на **кожній** ітерації

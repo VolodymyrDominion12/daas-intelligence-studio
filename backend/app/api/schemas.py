@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from ..models import ApiSourceSpec, FieldSpec, Limits, SourcePolicy, TaskSpec
+from ..models import (
+    ApiSourceSpec,
+    DeliveryChannel,
+    DeliveryFilters,
+    FieldSpec,
+    Limits,
+    SourcePolicy,
+    SubscriptionInfo,
+    TaskSpec,
+)
+from ..pipeline.scheduler import validate_cron
 
 
 class CreateTaskRequest(BaseModel):
@@ -26,6 +36,64 @@ class RunRequest(BaseModel):
     force: bool = False
     acknowledge_high_risk: bool = False
     reason: str = Field(default="", max_length=500)
+
+
+class ScheduleRequest(BaseModel):
+    cron: str = Field(min_length=3, max_length=100)
+    enabled: bool = True
+    catch_up: bool = True
+    acknowledge_high_risk: bool = False
+    reason: str = Field(default="", max_length=500)
+
+    @field_validator("cron")
+    @classmethod
+    def _valid_cron(cls, value: str) -> str:
+        return validate_cron(value)
+
+
+class CreateSubscriptionRequest(BaseModel):
+    name: str = Field(default="", max_length=120)
+    channel: DeliveryChannel
+    target: str = Field(min_length=1, max_length=2000)
+    secret: str = Field(default="", max_length=500)
+    filters: DeliveryFilters = Field(default_factory=DeliveryFilters)
+    enabled: bool = True
+
+
+class UpdateSubscriptionRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    target: str | None = Field(default=None, min_length=1, max_length=2000)
+    secret: str | None = Field(default=None, max_length=500)
+    filters: DeliveryFilters | None = None
+    enabled: bool | None = None
+
+
+class SubscriptionView(BaseModel):
+    id: str
+    task_id: str
+    name: str = ""
+    channel: DeliveryChannel
+    target: str
+    has_secret: bool = False
+    filters: DeliveryFilters = Field(default_factory=DeliveryFilters)
+    enabled: bool = True
+    created_at: str
+    updated_at: str
+
+
+def subscription_view(sub: SubscriptionInfo) -> SubscriptionView:
+    return SubscriptionView(
+        id=sub.id,
+        task_id=sub.task_id,
+        name=sub.name,
+        channel=sub.channel,
+        target=sub.target,
+        has_secret=bool(sub.secret),
+        filters=sub.filters,
+        enabled=sub.enabled,
+        created_at=sub.created_at.isoformat(),
+        updated_at=sub.updated_at.isoformat(),
+    )
 
 
 class EnrichRequest(BaseModel):
@@ -82,3 +150,16 @@ def policy_view(policy: SourcePolicy) -> SourcePolicyView:
         allowed_fields=policy.allowed_fields,
         reviewed_at=policy.reviewed_at.isoformat() if policy.reviewed_at else None,
     )
+
+
+class GoldCaseInput(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    content: str = Field(min_length=1, max_length=1_000_000)
+    content_type: Literal["auto", "html", "json"] = "auto"
+    expected: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+
+
+class EvalRequest(BaseModel):
+    cases: list[GoldCaseInput] = Field(default_factory=list, max_length=200)
+    gold_preset: str | None = Field(default=None, max_length=100)
+    min_f1: float | None = Field(default=None, ge=0.0, le=1.0)

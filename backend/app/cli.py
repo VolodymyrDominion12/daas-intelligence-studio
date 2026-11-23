@@ -16,12 +16,19 @@ from .config import Settings, get_settings
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import OperationalStore
 from .enrichment.dedupe import find_duplicates
+from .models import DeliveryChannel, DeliveryFilters
+from .pipeline.quality import load_gold_set
 from .runtime import RunConflict, Studio
 from .storage.exports import export_dataset
+from .utils import UnsafeUrlError
 
 app = typer.Typer(add_completion=False, help="DaaS Intelligence Studio CLI", no_args_is_help=True)
 task_app = typer.Typer(help="Керування задачами", no_args_is_help=True)
+schedule_app = typer.Typer(help="Керування розкладами запусків", no_args_is_help=True)
+notify_app = typer.Typer(help="Канали доставки дельти (Webhook / Telegram)", no_args_is_help=True)
 app.add_typer(task_app, name="task")
+app.add_typer(schedule_app, name="schedule")
+app.add_typer(notify_app, name="notify")
 
 
 def _studio(settings: Settings | None = None) -> Studio:
@@ -197,6 +204,203 @@ def task_show(task_id: str) -> None:
         report = studio.store.get_calibration(task_id)
         if report:
             typer.echo("\ncalibration:\n" + report)
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@schedule_app.command("set")
+def schedule_set(
+    task_id: str,
+    cron: Annotated[str, typer.Option("--cron", help="5-польовий cron у UTC або @hourly/@daily/@weekly")],
+    enabled: Annotated[bool, typer.Option("--enabled/--disabled")] = True,
+    catch_up: Annotated[bool, typer.Option("--catch-up/--no-catch-up")] = True,
+    ack_high_risk: Annotated[
+        bool, typer.Option("--ack-high-risk", help="Підтвердити джерела з tos_risk=high")
+    ] = False,
+    reason: Annotated[str, typer.Option(help="Причина підтвердження (мін. 10 символів)")] = "",
+) -> None:
+    """Налаштувати cron-розклад для задачі."""
+    studio = _studio()
+    try:
+        try:
+            sched = studio.set_schedule(
+                task_id,
+                cron=cron,
+                enabled=enabled,
+                catch_up=catch_up,
+                acknowledge_high_risk=ack_high_risk,
+                reason=reason,
+            )
+        except (KeyError, ValueError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(
+            f"schedule {sched.task_id} | cron={sched.cron} | enabled={sched.enabled} | "
+            f"catch_up={sched.catch_up} | next={sched.next_run_at}"
+        )
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@schedule_app.command("show")
+def schedule_show(task_id: str) -> None:
+    """Показати розклад задачі."""
+    studio = _studio()
+    try:
+        if studio.store.get_task(task_id) is None:
+            typer.echo(f"❌ task not found: {task_id}", err=True)
+            raise typer.Exit(code=1)
+        sched = studio.store.get_schedule(task_id)
+        if sched is None:
+            typer.echo(f"Розклад для задачі {task_id} не налаштовано")
+            return
+        typer.echo(sched.model_dump_json(indent=2))
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@schedule_app.command("list")
+def schedule_list() -> None:
+    """Показати всі розклади."""
+    studio = _studio()
+    try:
+        items = studio.store.list_schedules()
+        if not items:
+            typer.echo("Розкладів немає")
+            return
+        for sched in items:
+            state = "on" if sched.enabled else "off"
+            typer.echo(
+                f"{sched.task_id}  {state:<3}  {sched.cron:<15}  next={sched.next_run_at}"
+            )
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@schedule_app.command("delete")
+def schedule_delete(task_id: str) -> None:
+    """Видалити розклад задачі."""
+    studio = _studio()
+    try:
+        try:
+            deleted = studio.delete_schedule(task_id)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if deleted:
+            typer.echo(f"✅ Видалено розклад для {task_id}")
+        else:
+            typer.echo(f"Розклад для задачі {task_id} не знайдено")
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@notify_app.command("add")
+def notify_add(
+    task_id: str,
+    channel: Annotated[DeliveryChannel, typer.Option("--channel", help="webhook | telegram")],
+    target: Annotated[str, typer.Option("--target", help="URL webhook або Telegram chat_id")],
+    name: Annotated[str, typer.Option("--name", help="Назва підписки")] = "",
+    secret: Annotated[str, typer.Option("--secret", help="Секрет для HMAC-SHA256 підпису")] = "",
+    event: Annotated[
+        list[str] | None, typer.Option("--event", help="Фільтр типу події (можна кілька)")
+    ] = None,
+    keyword: Annotated[
+        list[str] | None, typer.Option("--keyword", help="Ключове слово (можна кілька)")
+    ] = None,
+    min_amount: Annotated[float | None, typer.Option("--min-amount", help="Мінімальна сума")] = None,
+    max_amount: Annotated[float | None, typer.Option("--max-amount", help="Максимальна сума")] = None,
+    notify_errors: Annotated[
+        bool, typer.Option("--notify-errors/--no-notify-errors", help="Алерти про збої й 0 записів")
+    ] = False,
+    enabled: Annotated[bool, typer.Option("--enabled/--disabled")] = True,
+) -> None:
+    """Додати підписку доставки дельти або алертів."""
+    studio = _studio()
+    try:
+        try:
+            filters = DeliveryFilters(
+                event_types=list(event or []),
+                keywords=list(keyword or []),
+                min_amount=min_amount,
+                max_amount=max_amount,
+                notify_on_error=notify_errors,
+            )
+            sub = studio.create_subscription(
+                task_id,
+                name=name,
+                channel=channel,
+                target=target,
+                secret=secret,
+                filters=filters,
+                enabled=enabled,
+            )
+        except (KeyError, ValueError, ComplianceError, UnsafeUrlError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(
+            f"subscription {sub.id} | channel={sub.channel} | target={sub.target} | "
+            f"enabled={sub.enabled}"
+        )
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@notify_app.command("list")
+def notify_list(task_id: str) -> None:
+    """Показати підписки доставки для задачі."""
+    studio = _studio()
+    try:
+        try:
+            subs = studio.list_subscriptions(task_id)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if not subs:
+            typer.echo("Підписок немає")
+            return
+        for sub in subs:
+            state = "on" if sub.enabled else "off"
+            typer.echo(f"{sub.id}  {state:<3}  {sub.channel:<8}  {sub.target}  {sub.name}")
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@notify_app.command("test")
+def notify_test(task_id: str, sub_id: str) -> None:
+    """Надіслати тестове сповіщення по підписці."""
+    async def run() -> None:
+        studio = _studio()
+        try:
+            ok, detail = await studio.test_subscription(task_id, sub_id)
+            if ok:
+                typer.echo(f"✅ {detail}")
+            else:
+                typer.echo(f"❌ {detail}", err=True)
+                raise typer.Exit(code=1)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        finally:
+            await studio.aclose()
+
+    asyncio.run(run())
+
+
+@notify_app.command("delete")
+def notify_delete(task_id: str, sub_id: str) -> None:
+    """Видалити підписку доставки."""
+    studio = _studio()
+    try:
+        try:
+            deleted = studio.delete_subscription(task_id, sub_id)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if deleted:
+            typer.echo(f"✅ Видалено підписку {sub_id}")
+        else:
+            typer.echo(f"Підписку {sub_id} не знайдено")
     finally:
         asyncio.run(studio.aclose())
 
@@ -412,6 +616,44 @@ def backup(
         store.close()
 
     typer.echo(f"✅ backup: {result} ({result.stat().st_size} B)")
+
+
+@app.command("eval")
+def eval_command(
+    task_id: Annotated[str, typer.Option("--task", help="ID задачі")],
+    gold: Annotated[Path, typer.Option("--gold", help="Шлях до JSON gold-набору")],
+    min_f1: Annotated[
+        float | None, typer.Option("--min-f1", min=0.0, max=1.0, help="Поріг F1 [0..1]")
+    ] = None,
+) -> None:
+    """Оцінити якість витягування на локальному gold-set наборі (офлайн)."""
+    async def run() -> None:
+        studio = _studio()
+        try:
+            dataset = load_gold_set(gold)
+            report = await studio.evaluate_task(task_id, cases=dataset.cases, min_f1=min_f1)
+            status_icon = "✅" if report.passed else "❌"
+            typer.echo(
+                f"{status_icon} eval [{report.gold_name}] "
+                f"F1={report.f1:.1%} (min={report.min_f1:.1%}) "
+                f"P={report.precision:.1%} R={report.recall:.1%} cov={report.coverage:.1f}% "
+                f"llm_fallback={report.llm_fallback_pct:.1f}% "
+                f"usd/1k=${report.usd_per_1k_records:.4f}"
+            )
+            for field_key, metrics in report.fields.items():
+                typer.echo(
+                    f"   {field_key:<16} F1={metrics.f1:.1%} "
+                    f"P={metrics.precision:.1%} R={metrics.recall:.1%} cov={metrics.coverage:.1f}%"
+                )
+            if not report.passed:
+                raise typer.Exit(code=1)
+        except (KeyError, ValueError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        finally:
+            await studio.aclose()
+
+    asyncio.run(run())
 
 
 def _writable(path: Path) -> bool:

@@ -1,17 +1,24 @@
 import type {
+  ApiSourceSpec,
   CalibrationReport,
   ConfigResponse,
   DatasetPayload,
+  DeliveryChannel,
+  DeliveryFilters,
   DuplicatesResponse,
+  EvalReport,
   EventInfo,
   ExportItem,
   ExportResult,
   FieldSpec,
+  GoldCaseInput,
   Limits,
   RecordDetail,
   RecordsResponse,
   RunInfo,
+  ScheduleInfo,
   SourcePolicyView,
+  SubscriptionView,
   TaskDetail,
   TaskInfo,
   TaskSpec,
@@ -76,7 +83,12 @@ export const api = {
   config: () => request<ConfigResponse>('/config'),
   tasks: () => request<{ items: TaskInfo[] }>('/tasks'),
   task: (id: string) => request<TaskDetail>(`/tasks/${id}`),
-  createTask: (payload: { prompt: string; seeds: string[]; title?: string }) =>
+  createTask: (payload: {
+    prompt: string
+    seeds: string[]
+    title?: string
+    api_source?: ApiSourceSpec | null
+  }) =>
     request<{ task: TaskInfo; spec: TaskSpec }>('/tasks', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -111,6 +123,70 @@ export const api = {
     request<{ run: RunInfo }>(`/tasks/${id}/run`, {
       method: 'POST',
       body: JSON.stringify({ skip_calibration: false, force: false, ...options }),
+    }),
+  schedules: () => request<{ items: ScheduleInfo[] }>('/schedules'),
+  schedule: (id: string) => request<{ schedule: ScheduleInfo | null }>(`/tasks/${id}/schedule`),
+  setSchedule: (
+    id: string,
+    payload: {
+      cron: string
+      enabled?: boolean
+      catch_up?: boolean
+      acknowledge_high_risk?: boolean
+      reason?: string
+    },
+  ) =>
+    request<{ schedule: ScheduleInfo }>(`/tasks/${id}/schedule`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  deleteSchedule: (id: string) =>
+    request<{ deleted: boolean }>(`/tasks/${id}/schedule`, { method: 'DELETE' }),
+  subscriptions: (id: string) =>
+    request<{ items: SubscriptionView[] }>(`/tasks/${id}/subscriptions`),
+  createSubscription: (
+    id: string,
+    payload: {
+      name?: string
+      channel: DeliveryChannel
+      target: string
+      secret?: string
+      filters?: Partial<DeliveryFilters>
+      enabled?: boolean
+    },
+  ) =>
+    request<{ subscription: SubscriptionView }>(`/tasks/${id}/subscriptions`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateSubscription: (
+    id: string,
+    subId: string,
+    payload: {
+      name?: string
+      target?: string
+      secret?: string
+      filters?: Partial<DeliveryFilters>
+      enabled?: boolean
+    },
+  ) =>
+    request<{ subscription: SubscriptionView }>(`/tasks/${id}/subscriptions/${subId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deleteSubscription: (id: string, subId: string) =>
+    request<{ deleted: boolean }>(`/tasks/${id}/subscriptions/${subId}`, { method: 'DELETE' }),
+  testSubscription: (id: string, subId: string) =>
+    request<{ ok: boolean; detail: string }>(`/tasks/${id}/subscriptions/${subId}/test`, {
+      method: 'POST',
+    }),
+  evalTask: (
+    id: string,
+    payload: { cases?: GoldCaseInput[]; gold_preset?: string; min_f1?: number },
+  ) =>
+    request<{ report: EvalReport }>(`/tasks/${id}/eval`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   enrich: (id: string, columnKeys: string[] | null = null) =>
     request<{ run: RunInfo }>(`/tasks/${id}/enrich`, {

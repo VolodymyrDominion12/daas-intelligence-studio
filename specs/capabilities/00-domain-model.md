@@ -3,7 +3,7 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
-| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py` |
+| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
 | **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07 |
 | **Статус** | as-built v0.1 |
 
@@ -14,6 +14,9 @@
 | Задача | `TaskInfo` + `TaskSpec` | SQLite `tasks.spec_json` | Що збираємо: колонки, seed-и, ліміти, збагачення |
 | Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання |
 | API-джерело | `ApiSourceSpec` | у `TaskSpec.api_source` | Декларативний мапінг JSON API, курсор, пагінація |
+| Розклад | `ScheduleInfo` | SQLite `schedules` | Cron-вираз (UTC), `catch_up`, `next_run_at`, останній запуск |
+| Підписка доставки | `SubscriptionInfo` + `DeliveryFilters` | SQLite `subscriptions` | Канал (`webhook`/`telegram`), ціль, фільтри дельти, алерти власнику |
+| Якість і gold eval | `QualityChecksReport` + `EvalReport` | `dataset_versions.manifest_json` | Авто-інваріанти після прогону (падіння рядків, обов'язкові поля) і P/R/F1 на gold-set |
 | Запуск | `RunInfo` + `RunStats` | SQLite `runs` | Один прогін `calibrate / collect / enrich / snapshot` |
 | Подія | `EventInfo` | SQLite `events` | Аудит і живий журнал (SSE) |
 | Датасет | `DatasetInfo` | SQLite `datasets`, `dataset_versions` | Версії, маніфести, якість |
@@ -100,6 +103,10 @@ Query-параметри в `seeds` зберігаються, коли зада�
 |:---|:---|:---|:---|
 | `task_created`, `plan_ready` | info | `runtime.Studio.create_task` | Створено задачу; `data.spec` — план |
 | `task_updated`, `column_added` | info | `api/tasks.py` | Редагування задачі/колонок |
+| `schedule_updated`, `schedule_deleted` | info | `runtime.Studio` | Створення/оновлення/видалення cron-розкладу задачі |
+| `schedule_triggered` | info | `pipeline/scheduler.py` | Планувальник запустив плановий або доганяючий `collect` |
+| `schedule_skipped` | info | `pipeline/scheduler.py` | Пропуск слоту (`active_run` або `missed_no_catchup`) |
+| `schedule_blocked` | warning | `pipeline/scheduler.py` | Розклад заблоковано комплаєнсом або відсутнім калібруванням |
 | `run_created` | info | `runtime.Studio` | Запуск поставлено |
 | `run_started`, `run_finished` | info/warning | `pipeline/runner.py` | Початок/кінець запуску; `data.version`, `rows`, … |
 | `run_failed` | error | runner, `Studio._guard` | Виняток у запуску |
@@ -116,6 +123,10 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `selector_healed` | info | runner | Схему перегенеровано після промаху |
 | `records_removed`, `tombstones_skipped`, `tombstones_suspicious` | info/debug/warning | runner | Tombstones (див. 08) |
 | `changes_detected`, `new_entity`, `removed_entity`, `field_changed`, `price_drop` | info/warning | runner | Зміни між версіями |
+| `quality_warning` | warning | `pipeline/runner.py` | Падіння кількості рядків або порожнє обов'язкове поле після прогону |
+| `eval_completed` | info/warning | `runtime.Studio` | Підсумок офлайн gold-set eval (P/R/F1 без сирих PII-значень) |
+| `subscription_created`, `subscription_updated`, `subscription_deleted` | info | `runtime.Studio` | Керування підписками доставки дельти (`data.subscription_id`) |
+| `delivery_sent`, `delivery_failed` | info/warning | `pipeline/delivery.py` | Результат відправки дельти, алерту чи тесту (`data.subscription_id`, без секретів) |
 | `compliance_blocked` | error/warning | `Studio._compliance_gate`, `PolicyGuardFetcher` | Заблоковано політикою (URL редагований) |
 | `compliance_override` | warning | `OperationalStore.create_run` (audit) | Підтверджено запуск по `high`-джерелах |
 | `export_created` | info | `api/data.py` | Створено файл експорту |

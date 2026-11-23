@@ -19,11 +19,14 @@ from ..config import Paths
 from ..models import (
     CssSchema,
     DatasetInfo,
+    DeliveryFilters,
     EventInfo,
     FieldSpec,
     RunInfo,
     RunStats,
+    ScheduleInfo,
     SourcePolicy,
+    SubscriptionInfo,
     TaskInfo,
     TaskSpec,
 )
@@ -184,6 +187,55 @@ MIGRATIONS: list[tuple[int, str]] = [
             next_url TEXT,
             last_modified TEXT,
             updated_at TEXT NOT NULL
+        );
+        """,
+    ),
+    (
+        5,
+        """
+        CREATE TABLE schedules (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            cron TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            catch_up INTEGER NOT NULL DEFAULT 1,
+            acknowledge_high_risk INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            next_run_at TEXT,
+            last_run_at TEXT,
+            last_run_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_schedules_due ON schedules(enabled, next_run_at);
+        """,
+    ),
+    (
+        6,
+        """
+        CREATE TABLE subscriptions (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            name TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL,
+            target TEXT NOT NULL,
+            secret TEXT NOT NULL DEFAULT '',
+            filters_json TEXT NOT NULL DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_subscriptions_task ON subscriptions(task_id, enabled);
+
+        CREATE TABLE delivery_log (
+            subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+            dedup_key TEXT NOT NULL,
+            run_id TEXT,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT,
+            PRIMARY KEY (subscription_id, dedup_key)
         );
         """,
     ),
@@ -687,6 +739,29 @@ class OperationalStore:
             for row in rows
         ]
 
+    def update_latest_version_manifest(self, dataset_id: str, patch: dict[str, Any]) -> int | None:
+        """Merge ``patch`` into the latest dataset version manifest (for post-run eval metrics)."""
+        if not patch:
+            return None
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT version, manifest_json FROM dataset_versions"
+                " WHERE dataset_id = ? ORDER BY version DESC LIMIT 1",
+                (dataset_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            manifest = json_loads(row["manifest_json"], {})
+            if not isinstance(manifest, dict):
+                manifest = {}
+            manifest.update(patch)
+            version = int(row["version"])
+            conn.execute(
+                "UPDATE dataset_versions SET manifest_json = ? WHERE dataset_id = ? AND version = ?",
+                (json_dumps(manifest), dataset_id, version),
+            )
+            return version
+
     # -- selector cache ---------------------------------------------------
     def get_selector(self, domain: str, signature: str) -> CssSchema | None:
         row = self._one(
@@ -878,6 +953,259 @@ class OperationalStore:
     def reset_api_state(self, task_id: str) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM api_state WHERE task_id = ?", (task_id,))
+
+    # -- schedules --------------------------------------------------------
+    def _to_schedule(self, row: sqlite3.Row) -> ScheduleInfo:
+        return ScheduleInfo(
+            task_id=row["task_id"],
+            cron=row["cron"],
+            enabled=bool(row["enabled"]),
+            catch_up=bool(row["catch_up"]),
+            acknowledge_high_risk=bool(row["acknowledge_high_risk"]),
+            reason=row["reason"] or "",
+            next_run_at=datetime.fromisoformat(row["next_run_at"]) if row["next_run_at"] else None,
+            last_run_at=datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None,
+            last_run_id=row["last_run_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def get_schedule(self, task_id: str) -> ScheduleInfo | None:
+        row = self._one("SELECT * FROM schedules WHERE task_id = ?", (task_id,))
+        return self._to_schedule(row) if row else None
+
+    def list_schedules(self) -> list[ScheduleInfo]:
+        return [
+            self._to_schedule(row)
+            for row in self._all("SELECT * FROM schedules ORDER BY updated_at DESC")
+        ]
+
+    def list_due_schedules(self, now_iso: str) -> list[ScheduleInfo]:
+        return [
+            self._to_schedule(row)
+            for row in self._all(
+                "SELECT * FROM schedules"
+                " WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?"
+                " ORDER BY next_run_at ASC",
+                (now_iso,),
+            )
+        ]
+
+    def upsert_schedule(
+        self,
+        task_id: str,
+        *,
+        cron: str,
+        enabled: bool = True,
+        catch_up: bool = True,
+        acknowledge_high_risk: bool = False,
+        reason: str = "",
+        next_run_at: datetime | None = None,
+    ) -> ScheduleInfo:
+        now_str = iso()
+        next_str = iso(next_run_at) if next_run_at is not None else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO schedules(task_id, cron, enabled, catch_up, acknowledge_high_risk,"
+                " reason, next_run_at, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(task_id) DO UPDATE SET"
+                " cron = excluded.cron,"
+                " enabled = excluded.enabled,"
+                " catch_up = excluded.catch_up,"
+                " acknowledge_high_risk = excluded.acknowledge_high_risk,"
+                " reason = excluded.reason,"
+                " next_run_at = excluded.next_run_at,"
+                " updated_at = excluded.updated_at",
+                (
+                    task_id,
+                    cron,
+                    int(enabled),
+                    int(catch_up),
+                    int(acknowledge_high_risk),
+                    reason,
+                    next_str,
+                    now_str,
+                    now_str,
+                ),
+            )
+        sched = self.get_schedule(task_id)
+        assert sched is not None
+        return sched
+
+    def mark_schedule_tick(
+        self,
+        task_id: str,
+        *,
+        next_run_at: datetime | None,
+        last_run_at: datetime | None = None,
+        last_run_id: str | None = None,
+    ) -> ScheduleInfo | None:
+        next_str = iso(next_run_at) if next_run_at is not None else None
+        last_str = iso(last_run_at) if last_run_at is not None else None
+        with self._lock:
+            self._conn.execute(
+                "UPDATE schedules SET next_run_at = ?,"
+                " last_run_at = COALESCE(?, last_run_at),"
+                " last_run_id = COALESCE(?, last_run_id),"
+                " updated_at = ?"
+                " WHERE task_id = ?",
+                (next_str, last_str, last_run_id, iso(), task_id),
+            )
+        return self.get_schedule(task_id)
+
+    def delete_schedule(self, task_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM schedules WHERE task_id = ?", (task_id,))
+        return cur.rowcount > 0
+
+    # -- subscriptions & delivery log (D-01) -------------------------------
+    def _to_subscription(self, row: sqlite3.Row) -> SubscriptionInfo:
+        filters_raw = json_loads(row["filters_json"], {})
+        return SubscriptionInfo(
+            id=row["id"],
+            task_id=row["task_id"],
+            name=row["name"] or "",
+            channel=row["channel"],
+            target=row["target"],
+            secret=row["secret"] or "",
+            filters=DeliveryFilters.model_validate(filters_raw),
+            enabled=bool(row["enabled"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def get_subscription(self, sub_id: str) -> SubscriptionInfo | None:
+        row = self._one("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+        return self._to_subscription(row) if row else None
+
+    def list_subscriptions(self, task_id: str) -> list[SubscriptionInfo]:
+        return [
+            self._to_subscription(row)
+            for row in self._all(
+                "SELECT * FROM subscriptions WHERE task_id = ? ORDER BY created_at ASC, rowid ASC",
+                (task_id,),
+            )
+        ]
+
+    def create_subscription(
+        self,
+        task_id: str,
+        *,
+        name: str = "",
+        channel: str,
+        target: str,
+        secret: str = "",
+        filters: DeliveryFilters | None = None,
+        enabled: bool = True,
+        sub_id: str | None = None,
+    ) -> SubscriptionInfo:
+        sub_id = sub_id or uuid.uuid4().hex[:12]
+        now_str = iso()
+        filters_json = (filters or DeliveryFilters()).model_dump_json()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO subscriptions(id, task_id, name, channel, target, secret,"
+                " filters_json, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    sub_id,
+                    task_id,
+                    name,
+                    channel,
+                    target,
+                    secret,
+                    filters_json,
+                    int(enabled),
+                    now_str,
+                    now_str,
+                ),
+            )
+        sub = self.get_subscription(sub_id)
+        assert sub is not None
+        return sub
+
+    def update_subscription(
+        self,
+        task_id: str,
+        sub_id: str,
+        *,
+        name: str | None = None,
+        target: str | None = None,
+        secret: str | None = None,
+        filters: DeliveryFilters | None = None,
+        enabled: bool | None = None,
+    ) -> SubscriptionInfo | None:
+        existing = self._one(
+            "SELECT * FROM subscriptions WHERE id = ? AND task_id = ?", (sub_id, task_id)
+        )
+        if existing is None:
+            return None
+        fields: list[str] = []
+        values: list[Any] = []
+        if name is not None:
+            fields.append("name = ?")
+            values.append(name)
+        if target is not None:
+            fields.append("target = ?")
+            values.append(target)
+        if secret is not None:
+            fields.append("secret = ?")
+            values.append(secret)
+        if filters is not None:
+            fields.append("filters_json = ?")
+            values.append(filters.model_dump_json())
+        if enabled is not None:
+            fields.append("enabled = ?")
+            values.append(int(enabled))
+        if not fields:
+            return self._to_subscription(existing)
+        fields.append("updated_at = ?")
+        values.append(iso())
+        values.extend([sub_id, task_id])
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE subscriptions SET {', '.join(fields)} WHERE id = ? AND task_id = ?",
+                values,
+            )
+        return self.get_subscription(sub_id)
+
+    def delete_subscription(self, task_id: str, sub_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM subscriptions WHERE id = ? AND task_id = ?", (sub_id, task_id)
+            )
+        return cur.rowcount > 0
+
+    def is_delivered(self, subscription_id: str, dedup_key: str) -> bool:
+        row = self._one(
+            "SELECT 1 FROM delivery_log WHERE subscription_id = ? AND dedup_key = ?"
+            " AND status = 'sent' LIMIT 1",
+            (subscription_id, dedup_key),
+        )
+        return row is not None
+
+    def record_delivery(
+        self,
+        subscription_id: str,
+        dedup_key: str,
+        *,
+        run_id: str | None = None,
+        status: str = "sent",
+        attempts: int = 1,
+        error: str | None = None,
+    ) -> None:
+        now_str = iso()
+        delivered_str = now_str if status == "sent" else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO delivery_log(subscription_id, dedup_key, run_id, status, attempts,"
+                " error, created_at, delivered_at) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(subscription_id, dedup_key) DO UPDATE SET"
+                " run_id = excluded.run_id, status = excluded.status,"
+                " attempts = excluded.attempts, error = excluded.error,"
+                " delivered_at = COALESCE(excluded.delivered_at, delivery_log.delivered_at)",
+                (subscription_id, dedup_key, run_id, status, attempts, error, now_str, delivered_str),
+            )
 
     # -- aggregates -------------------------------------------------------
     def overview(self) -> dict[str, Any]:

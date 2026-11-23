@@ -1,0 +1,35 @@
+{
+  "name": "prozorro_tenders_v1",
+  "cases": [
+    {
+      "url": "http://api.openprocurement.local/api/2.5/tenders/tender-001",
+      "fixture": "../prozorro_tender_001.json",
+      "content_type": "json",
+      "expected": [
+        {
+          "tender_id": "UA-2026-11-23-000101-a",
+          "title": "Послуги з модернізації серверної інфраструктури",
+          "amount": 1250000.0,
+          "status": "active.tendering",
+          "cpv": "72000000-5",
+          "region": "м. Київ"
+        }
+      ]
+    },
+    {
+      "url": "http://api.openprocurement.local/api/2.5/tenders/tender-002",
+      "fixture": "../prozorro_tender_002.json",
+      "content_type": "json",
+      "expected": [
+        {
+          "tender_id": "UA-P-2026-11-23-000202-1",
+          "title": "Оренда нежитлового приміщення 140 м2 в центрі Львова",
+          "amount": 85000.0,
+          "status": "active.auction",
+          "cpv": "70220000-9",
+          "region": "Львівська область"
+        }
+      ]
+    }
+  ]
+}

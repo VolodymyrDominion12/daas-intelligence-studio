@@ -3,7 +3,7 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore` |
-| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py` |
+| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
 | **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), ADR-02 |
 | **Статус** | as-built v0.1 |
 
@@ -11,7 +11,7 @@
 
 ```text
 <DAAS_STORAGE_DIR, за замовчуванням <repo>/storage>/
-├── operational.sqlite      # tasks, runs, jobs, events, ledger, registry, calibrations, misses
+├── operational.sqlite      # tasks, runs, jobs, events, ledger, registry, calibrations, misses, api_state, schedules, subscriptions, delivery_log
 ├── analytics.duckdb        # record_versions, quarantine, current_records
 ├── raw_cache/<xx>/<sha256>.json.zst
 ├── snapshots/dataset=<slug>/version=<NNNN>/{part.parquet, manifest.json}
@@ -27,7 +27,10 @@
 ### REQ-OPS-001 — Усе через env `DAAS_*`
 Налаштування **ПОВИННІ** читатися з env з префіксом `DAAS_` і файлів `<repo>/.env`,
 `<repo>/backend/.env`; невідомі ключі ігноруються. Кожне нове налаштування **ПОВИННО** з'являтися в
-`.env.example` з коментарем у тій самій зміні. Відносний `storage_dir` — відносно кореня репо.
+`.env.example` з коментарем у тій самій зміні (включно з `DAAS_SCHEDULER_ENABLED`,
+`DAAS_SCHEDULER_POLL_SECONDS`, `DAAS_TELEGRAM_BOT_TOKEN`, `DAAS_DELIVERY_TIMEOUT_S`,
+`DAAS_DELIVERY_MAX_RETRIES`, `DAAS_QUALITY_MAX_DROP_RATIO`, `DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`,
+`DAAS_EVAL_MIN_F1`). Відносний `storage_dir` — відносно кореня репо.
 - **Перевірка:** — (прогалина)
 
 ### REQ-OPS-002 — Офлайн-режим
@@ -38,11 +41,13 @@
 ## 3. Вимоги — SQLite
 
 ### REQ-OPS-010 — Forward-only міграції
-`OperationalStore` **ПОВИНЕН** працювати в WAL і застосовувати `MIGRATIONS` (зараз 1–3) по порядку
+`OperationalStore` **ПОВИНЕН** працювати в WAL і застосовувати `MIGRATIONS` (1–6) по порядку
 один раз; нова таблиця/колонка — лише новою міграцією з наступним номером, ніколи не редагуванням
 старої.
-- **Перевірка:** `tests/test_storage.py::test_queue_lease_retry_and_cancel` (схема працює);
-  апгрейд старого файлу SQLite — прогалина
+- **Перевірка:** `tests/test_storage.py::test_queue_lease_retry_and_cancel`,
+  `tests/test_open_api_source.py::test_sqlite_migration_v4_opens_v3_database`,
+  `tests/test_scheduler.py::test_sqlite_migration_v5_opens_v4_database`,
+  `tests/test_delivery.py::test_sqlite_migration_v6_opens_v5_database`
 
 ## 4. Вимоги — бекап
 
@@ -62,10 +67,14 @@
 
 ### REQ-OPS-030 — Команди
 `daas` **ПОВИНЕН** надавати: `init`, `serve [--host --port --reload]`, `demo [--serve --storage
---port]`, `doctor`, `task create|list|show`, `calibrate`, `collect [--pages]`, `enrich [--column]`,
-`snapshot`, `export [--format --mask/--no-mask --limit]`, `duplicates [--threshold]`, `changes`,
-`backup [--out --cache]`. `calibrate/collect` підтримують `--ack-high-risk --reason`.
-- **Перевірка:** — (прогалина: немає тестів CLI через `typer.testing.CliRunner`)
+--port]`, `doctor`, `task create|list|show`, `schedule set|show|list|delete`,
+`notify add|list|test|delete`, `calibrate`, `collect [--pages]`, `enrich [--column]`, `snapshot`,
+`export [--format --mask/--no-mask --limit]`, `duplicates [--threshold]`, `changes`,
+`backup [--out --cache]`, `eval --task <id> --gold <path> [--min-f1]`.
+`calibrate/collect/schedule set` підтримують `--ack-high-risk --reason`.
+- **Перевірка (частково):** `tests/test_scheduler.py::test_cli_schedule_commands` (`schedule`),
+  `tests/test_delivery.py::test_cli_notify_commands` (`notify`),
+  `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes` (`eval`); інші команди — прогалина
 
 ### REQ-OPS-031 — Коди виходу
 Запускові команди **ПОВИННІ** завершуватися: `2` — конфлікт запуску; `3` — комплаєнс (з підказкою

@@ -103,6 +103,20 @@ class Settings(BaseSettings):
     searxng_url: str | None = None
     search_max_results: int = 10
 
+    # --- scheduler --------------------------------------------------------
+    scheduler_enabled: bool = True
+    scheduler_poll_seconds: float = Field(default=15.0, ge=0.5, le=3600.0)
+
+    # --- delivery (D-01) --------------------------------------------------
+    telegram_bot_token: str | None = None
+    delivery_timeout_s: float = Field(default=10.0, ge=1.0, le=60.0)
+    delivery_max_retries: int = Field(default=3, ge=1, le=10)
+
+    # --- quality & eval (P1-01) -------------------------------------------
+    quality_max_drop_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    quality_min_required_fill_pct: float = Field(default=80.0, ge=0.0, le=100.0)
+    eval_min_f1: float = Field(default=0.8, ge=0.0, le=1.0)
+
     # --- runtime flags ----------------------------------------------------
     offline: bool = False
     log_level: str = "INFO"

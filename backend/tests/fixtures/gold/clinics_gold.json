@@ -1,0 +1,33 @@
+{
+  "name": "clinics_catalog_v1",
+  "cases": [
+    {
+      "url": "https://clinics.example/catalog.html",
+      "fixture": "../catalog.html",
+      "content_type": "html",
+      "expected": [
+        {
+          "name": "Альфа Стоматологія",
+          "city": "Київ",
+          "phone": "+380 44 111 22 33",
+          "rating": 4.8,
+          "website": "https://alpha.example"
+        },
+        {
+          "name": "Бета Дентал",
+          "city": "Київ",
+          "phone": "+380 44 222 33 44",
+          "rating": 4.2,
+          "website": "https://beta.example"
+        },
+        {
+          "name": "Гама Смайл",
+          "city": "Львів",
+          "phone": "+380 32 333 44 55",
+          "rating": 3.9,
+          "website": "https://gamma.example"
+        }
+      ]
+    }
+  ]
+}

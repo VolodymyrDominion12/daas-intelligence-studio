@@ -12,16 +12,22 @@ from fastapi.responses import StreamingResponse
 from ..compliance import ComplianceError
 from ..enrichment.registry import enricher_catalog
 from ..models import EventInfo
+from ..pipeline.quality import GoldCase
 from ..runtime import RunConflict as RunConflictError
-from ..utils import iso
+from ..utils import UnsafeUrlError, iso
 from .deps import StudioDep
 from .schemas import (
     AddColumnRequest,
+    CreateSubscriptionRequest,
     CreateTaskRequest,
     EnrichRequest,
+    EvalRequest,
     LimitsRequest,
     RunRequest,
+    ScheduleRequest,
+    UpdateSubscriptionRequest,
     UpdateTaskRequest,
+    subscription_view,
 )
 
 router = APIRouter(prefix="/api", tags=["tasks"])
@@ -207,6 +213,138 @@ def get_calibration(task_id: str, studio: StudioDep) -> dict[str, Any]:
     _task_or_404(studio, task_id)
     raw = studio.store.get_calibration(task_id)
     return {"calibration": json.loads(raw) if raw else None}
+
+
+@router.get("/schedules")
+def list_schedules(studio: StudioDep) -> dict[str, Any]:
+    return {"items": [item.model_dump(mode="json") for item in studio.store.list_schedules()]}
+
+
+@router.get("/tasks/{task_id}/schedule")
+def get_schedule(task_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    sched = studio.store.get_schedule(task_id)
+    return {"schedule": sched.model_dump(mode="json") if sched else None}
+
+
+@router.put("/tasks/{task_id}/schedule")
+def put_schedule(task_id: str, payload: ScheduleRequest, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        sched = studio.set_schedule(
+            task_id,
+            cron=payload.cron,
+            enabled=payload.enabled,
+            catch_up=payload.catch_up,
+            acknowledge_high_risk=payload.acknowledge_high_risk,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"schedule": sched.model_dump(mode="json")}
+
+
+@router.delete("/tasks/{task_id}/schedule")
+def delete_schedule(task_id: str, studio: StudioDep) -> dict[str, bool]:
+    _task_or_404(studio, task_id)
+    return {"deleted": studio.delete_schedule(task_id)}
+
+
+@router.get("/tasks/{task_id}/subscriptions")
+def list_subscriptions(task_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    items = [subscription_view(sub).model_dump(mode="json") for sub in studio.list_subscriptions(task_id)]
+    return {"items": items}
+
+
+@router.post("/tasks/{task_id}/subscriptions", status_code=201)
+def create_subscription(
+    task_id: str, payload: CreateSubscriptionRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        sub = studio.create_subscription(
+            task_id,
+            name=payload.name,
+            channel=payload.channel,
+            target=payload.target,
+            secret=payload.secret,
+            filters=payload.filters,
+            enabled=payload.enabled,
+        )
+    except (ComplianceError, UnsafeUrlError):
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"subscription": subscription_view(sub).model_dump(mode="json")}
+
+
+@router.patch("/tasks/{task_id}/subscriptions/{sub_id}")
+def update_subscription(
+    task_id: str, sub_id: str, payload: UpdateSubscriptionRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        sub = studio.update_subscription(
+            task_id,
+            sub_id,
+            name=payload.name,
+            target=payload.target,
+            secret=payload.secret,
+            filters=payload.filters,
+            enabled=payload.enabled,
+        )
+    except (ComplianceError, UnsafeUrlError):
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Підписку не знайдено")
+    return {"subscription": subscription_view(sub).model_dump(mode="json")}
+
+
+@router.delete("/tasks/{task_id}/subscriptions/{sub_id}")
+def delete_subscription(task_id: str, sub_id: str, studio: StudioDep) -> dict[str, bool]:
+    _task_or_404(studio, task_id)
+    return {"deleted": studio.delete_subscription(task_id, sub_id)}
+
+
+@router.post("/tasks/{task_id}/subscriptions/{sub_id}/test")
+async def test_subscription(task_id: str, sub_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        ok, detail = await studio.test_subscription(task_id, sub_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Підписку не знайдено") from exc
+    return {"ok": ok, "detail": detail}
+
+
+@router.post("/tasks/{task_id}/eval")
+async def evaluate_task_endpoint(
+    task_id: str, payload: EvalRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    cases = [
+        GoldCase(
+            url=item.url,
+            content=item.content,
+            content_type=item.content_type,
+            expected=item.expected,
+        )
+        for item in payload.cases
+    ]
+    try:
+        report = await studio.evaluate_task(
+            task_id,
+            cases=cases or None,
+            gold_preset=payload.gold_preset,
+            min_f1=payload.min_f1,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Задачу не знайдено") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"report": report.model_dump(mode="json")}
 
 
 @router.get("/tasks/{task_id}/runs")

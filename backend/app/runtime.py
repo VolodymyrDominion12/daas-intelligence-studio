@@ -16,20 +16,33 @@ from .compliance import (
     login_violation,
     run_scope,
 )
-from .config import Settings, get_settings, load_runtime_token
+from .config import PROJECT_ROOT, Settings, get_settings, load_runtime_token
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import ActiveRunError, OperationalStore
 from .discovery import build_search
 from .enrichment.registry import build_registry, enricher_catalog
 from .extraction.engine import ExtractionEngine
 from .llm.router import LLMRouter
-from .models import ApiSourceSpec, RunInfo, TaskInfo, TaskSpec
+from .models import (
+    ApiSourceSpec,
+    DeliveryChannel,
+    DeliveryFilters,
+    EvalReport,
+    RunInfo,
+    ScheduleInfo,
+    SubscriptionInfo,
+    TaskInfo,
+    TaskSpec,
+)
 from .pipeline.calibration import Calibrator
+from .pipeline.delivery import DeltaDispatcher
 from .pipeline.planner import Planner
+from .pipeline.quality import GoldCase, load_gold_set, resolve_gold_preset_path, run_gold_eval
 from .pipeline.runner import PipelineRunner
+from .pipeline.scheduler import TaskScheduler, next_cron_after, validate_cron
 from .scraping.fetcher import build_fetcher
 from .storage.raw_cache import RawCache
-from .utils import utcnow
+from .utils import assert_public_url, iso, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +70,7 @@ class Studio:
         self.registry = build_registry()
         self.engine = ExtractionEngine(self.settings, self.router)
         self.calibrator = Calibrator(self.settings, self.store, self.fetcher, self.engine)
+        self.dispatcher = DeltaDispatcher(self.settings, self.store)
         self.runner = PipelineRunner(
             self.settings,
             self.store,
@@ -68,6 +82,7 @@ class Studio:
             self.registry,
             self.router,
             self.search,
+            dispatcher=self.dispatcher,
         )
         self.planner = Planner(
             self.settings,
@@ -76,11 +91,18 @@ class Studio:
             search=self.search,
             store=self.store,
         )
+        self.scheduler = TaskScheduler(self)
         self._jobs: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
+    def start_scheduler(self) -> None:
+        self.scheduler.start()
+
+    async def stop_scheduler(self) -> None:
+        await self.scheduler.stop()
+
     def interrupt_stale_runs(self) -> int:
         """Since runs live in-process, anything left 'running' is dead after restart."""
         interrupted = 0
@@ -105,10 +127,12 @@ class Studio:
         return interrupted
 
     async def aclose(self) -> None:
+        await self.stop_scheduler()
         for job in list(self._jobs.values()):
             job.cancel()
         if self._jobs:
             await asyncio.gather(*self._jobs.values(), return_exceptions=True)
+        await self.dispatcher.aclose()
         await self.router.aclose()
         await self.fetcher.aclose()
         if self.search is not None:
@@ -285,6 +309,234 @@ class Studio:
         return self.store.get_run(run_id)
 
     # ------------------------------------------------------------------
+    # schedules
+    # ------------------------------------------------------------------
+    def set_schedule(
+        self,
+        task_id: str,
+        *,
+        cron: str,
+        enabled: bool = True,
+        catch_up: bool = True,
+        acknowledge_high_risk: bool = False,
+        reason: str = "",
+        now: Any = None,
+    ) -> ScheduleInfo:
+        self._task(task_id)
+        normalized = validate_cron(cron)
+        if acknowledge_high_risk and len(reason.strip()) < 10:
+            raise ValueError("Вкажіть причину підтвердження високого ризику (мін. 10 символів)")
+        current = now or utcnow()
+        next_run_at = next_cron_after(normalized, current) if enabled else None
+        sched = self.store.upsert_schedule(
+            task_id,
+            cron=normalized,
+            enabled=enabled,
+            catch_up=catch_up,
+            acknowledge_high_risk=acknowledge_high_risk,
+            reason=reason.strip(),
+            next_run_at=next_run_at,
+        )
+        msg = f"Оновлено розклад: {normalized}" if enabled else f"Розклад вимкнено: {normalized}"
+        self.store.add_event(
+            task_id,
+            "schedule_updated",
+            msg,
+            data={
+                "cron": normalized,
+                "enabled": enabled,
+                "catch_up": catch_up,
+                "next_run_at": iso(next_run_at) if next_run_at else None,
+            },
+        )
+        return sched
+
+    def delete_schedule(self, task_id: str) -> bool:
+        self._task(task_id)
+        deleted = self.store.delete_schedule(task_id)
+        if deleted:
+            self.store.add_event(task_id, "schedule_deleted", "Розклад запусків видалено")
+        return deleted
+
+    # ------------------------------------------------------------------
+    # subscriptions (delta delivery, D-01)
+    # ------------------------------------------------------------------
+    def _validate_subscription_target(self, channel: str, target: str) -> str:
+        cleaned = target.strip()
+        if not cleaned:
+            raise ValueError("Вкажіть ціль доставки (Webhook URL або Telegram chat_id)")
+        if channel == "webhook":
+            assert_logged_out(cleaned)
+            assert_public_url(cleaned, allow_private=self.settings.allow_private_network)
+        return cleaned
+
+    def list_subscriptions(self, task_id: str) -> list[SubscriptionInfo]:
+        self._task(task_id)
+        return self.store.list_subscriptions(task_id)
+
+    def create_subscription(
+        self,
+        task_id: str,
+        *,
+        name: str = "",
+        channel: DeliveryChannel,
+        target: str,
+        secret: str = "",
+        filters: DeliveryFilters | None = None,
+        enabled: bool = True,
+    ) -> SubscriptionInfo:
+        self._task(task_id)
+        clean_target = self._validate_subscription_target(channel, target)
+        sub = self.store.create_subscription(
+            task_id,
+            name=name.strip(),
+            channel=channel,
+            target=clean_target,
+            secret=secret,
+            filters=filters,
+            enabled=enabled,
+        )
+        self.store.add_event(
+            task_id,
+            "subscription_created",
+            f"Створено підписку доставки ({channel}): {sub.name or sub.id}",
+            data={"subscription_id": sub.id, "channel": channel},
+        )
+        return sub
+
+    def update_subscription(
+        self,
+        task_id: str,
+        sub_id: str,
+        *,
+        name: str | None = None,
+        target: str | None = None,
+        secret: str | None = None,
+        filters: DeliveryFilters | None = None,
+        enabled: bool | None = None,
+    ) -> SubscriptionInfo | None:
+        self._task(task_id)
+        existing = self.store.get_subscription(sub_id)
+        if existing is None or existing.task_id != task_id:
+            return None
+        clean_target = (
+            self._validate_subscription_target(existing.channel, target)
+            if target is not None
+            else None
+        )
+        updated = self.store.update_subscription(
+            task_id,
+            sub_id,
+            name=name.strip() if name is not None else None,
+            target=clean_target,
+            secret=secret,
+            filters=filters,
+            enabled=enabled,
+        )
+        if updated is not None:
+            self.store.add_event(
+                task_id,
+                "subscription_updated",
+                f"Оновлено підписку доставки ({updated.channel}): {updated.name or updated.id}",
+                data={"subscription_id": updated.id, "enabled": updated.enabled},
+            )
+        return updated
+
+    def delete_subscription(self, task_id: str, sub_id: str) -> bool:
+        self._task(task_id)
+        deleted = self.store.delete_subscription(task_id, sub_id)
+        if deleted:
+            self.store.add_event(
+                task_id,
+                "subscription_deleted",
+                f"Видалено підписку доставки ({sub_id})",
+                data={"subscription_id": sub_id},
+            )
+        return deleted
+
+    async def test_subscription(self, task_id: str, sub_id: str) -> tuple[bool, str]:
+        task = self._task(task_id)
+        sub = self.store.get_subscription(sub_id)
+        if sub is None or sub.task_id != task_id:
+            raise KeyError(f"subscription not found: {sub_id}")
+        return await self.dispatcher.send_test(task, sub)
+
+    # ------------------------------------------------------------------
+    # quality & gold-set eval (P1-01)
+    # ------------------------------------------------------------------
+    async def evaluate_task(
+        self,
+        task_id: str,
+        *,
+        cases: list[GoldCase] | None = None,
+        gold_preset: str | None = None,
+        min_f1: float | None = None,
+    ) -> EvalReport:
+        task = self._task(task_id)
+        threshold = self.settings.eval_min_f1 if min_f1 is None else min_f1
+
+        if cases:
+            eval_cases = cases
+            gold_name = "inline"
+        elif gold_preset is not None:
+            path = resolve_gold_preset_path(
+                gold_preset,
+                [
+                    self.paths.root / "gold",
+                    PROJECT_ROOT / "backend" / "tests" / "fixtures" / "gold",
+                ],
+            )
+            dataset = load_gold_set(path)
+            eval_cases = dataset.cases
+            gold_name = dataset.name
+        else:
+            raise ValueError("Потрібно передати cases або gold_preset")
+
+        report = await run_gold_eval(
+            task.spec,
+            eval_cases,
+            engine=self.engine,
+            store=self.store,
+            min_f1=threshold,
+            gold_name=gold_name,
+        )
+        dataset_id = task.dataset_id or task.id
+        version = self.store.update_latest_version_manifest(
+            dataset_id, {"eval": report.model_dump(mode="json")}
+        )
+        if version is not None:
+            report = report.model_copy(update={"dataset_version": version})
+            self.store.update_latest_version_manifest(
+                dataset_id, {"eval": report.model_dump(mode="json")}
+            )
+
+        self.store.add_event(
+            task.id,
+            "eval_completed",
+            (
+                f"Gold eval ({report.gold_name}): F1={report.f1:.2%}, "
+                f"P={report.precision:.2%}, R={report.recall:.2%} "
+                f"({'пройдено' if report.passed else 'нижче порогу'})"
+            ),
+            level="info" if report.passed else "warning",
+            data={
+                "gold_name": report.gold_name,
+                "passed": report.passed,
+                "f1": report.f1,
+                "precision": report.precision,
+                "recall": report.recall,
+                "min_f1": report.min_f1,
+                "cases": report.cases,
+                "records_expected": report.records_expected,
+                "records_extracted": report.records_extracted,
+                "llm_fallback_pct": report.llm_fallback_pct,
+                "usd_per_1k_records": report.usd_per_1k_records,
+                "dataset_version": report.dataset_version,
+            },
+        )
+        return report
+
+    # ------------------------------------------------------------------
     # info
     # ------------------------------------------------------------------
     def capabilities(self) -> dict[str, Any]:
@@ -305,6 +557,7 @@ class Studio:
             "storage": str(self.paths.root),
             "budget_usd_default": self.settings.llm_budget_usd,
             "max_pages_default": self.settings.max_pages_per_run,
+            "scheduler_enabled": self.settings.scheduler_enabled,
         }
 
     def overview(self) -> dict[str, Any]:

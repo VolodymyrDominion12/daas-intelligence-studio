@@ -36,6 +36,7 @@ from ..scraping.page import extract_links
 from ..storage.raw_cache import RawCache
 from ..utils import iso, normalize_domain, unique, utcnow
 from .calibration import Calibrator
+from .quality import evaluate_dataset_quality
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class PipelineRunner:
         registry,
         router: LLMRouter,
         search=None,
+        dispatcher=None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -101,6 +103,7 @@ class PipelineRunner:
         self.registry = registry
         self.router = router
         self.search = search
+        self.dispatcher = dispatcher
         self.ai = AiColumns()
 
     # ------------------------------------------------------------------
@@ -135,6 +138,7 @@ class PipelineRunner:
         except Exception as exc:
             logger.exception("calibration failed")
             self._fail(task_id, run_id, exc)
+            await self._notify_run_failed(task_id, run_id, exc)
             raise
 
     # ------------------------------------------------------------------
@@ -242,6 +246,7 @@ class PipelineRunner:
             logger.exception("collect failed")
             self.rollback_removals(run_id)
             self._fail(task_id, run_id, exc)
+            await self._notify_run_failed(task_id, run_id, exc)
             raise
 
     def _api_initial_urls(self, task_id: str, spec: TaskSpec) -> list[str]:
@@ -718,6 +723,7 @@ class PipelineRunner:
         except Exception as exc:
             logger.exception("enrichment failed")
             self._fail(task_id, run_id, exc)
+            await self._notify_run_failed(task_id, run_id, exc)
             raise
 
     async def _enrich_row(self, row: dict, ctx: RunContext, context: EnrichmentContext, targets) -> None:
@@ -824,6 +830,7 @@ class PipelineRunner:
         except Exception as exc:
             logger.exception("snapshot failed")
             self._fail(task_id, run_id, exc)
+            await self._notify_run_failed(task_id, run_id, exc)
             raise
 
     # ------------------------------------------------------------------
@@ -836,7 +843,23 @@ class PipelineRunner:
         row_count = self.analytics.count_records(dataset_id)
         changes = await self._write_snapshot_and_diff(ctx, ctx.version)
 
+        existing_versions = [
+            item
+            for item in self.store.dataset_versions(dataset_id)
+            if int(item["version"]) < ctx.version
+        ]
+        previous_row_count = int(existing_versions[0]["row_count"]) if existing_versions else None
         fill = self.analytics.field_fill_rates(dataset_id, [c for c in ctx.spec.columns if not c.is_ai])
+        quality_checks = evaluate_dataset_quality(
+            row_count=row_count,
+            previous_row_count=previous_row_count,
+            fill_rates=fill,
+            columns=ctx.spec.columns,
+            observed_count=len(ctx.seen_keys) if ctx.full_crawl else None,
+            full_crawl=ctx.full_crawl,
+            max_drop_ratio=self.settings.quality_max_drop_ratio,
+            min_required_fill_pct=self.settings.quality_min_required_fill_pct,
+        )
         manifest = {
             "task_id": ctx.task.id,
             "dataset_version": ctx.version,
@@ -848,6 +871,7 @@ class PipelineRunner:
             "llm_calls": ctx.stats.llm_calls,
             "llm_spend_usd": round(ctx.budget.spent_usd, 4),
             "fill_rates": fill,
+            "quality_checks": quality_checks.model_dump(mode="json"),
             "changes": len(changes),
             "full_crawl": ctx.full_crawl,
             "removed": ctx.stats.records_removed,
@@ -884,8 +908,52 @@ class PipelineRunner:
                 "llm_usd": round(ctx.budget.spent_usd, 4),
             },
         )
+        if not quality_checks.passed:
+            summary_msg = "; ".join(issue.message for issue in quality_checks.issues)
+            self.store.add_event(
+                ctx.task.id,
+                "quality_warning",
+                f"Попередження якості даних (v{ctx.version}): {summary_msg}",
+                run_id=ctx.run_id,
+                level="warning",
+                data={
+                    "version": ctx.version,
+                    **quality_checks.model_dump(mode="json"),
+                },
+            )
         if changes:
             self._emit_changes(ctx, changes)
+        if self.dispatcher is not None:
+            try:
+                if changes:
+                    records_by_key = {
+                        row["record_key"]: row["payload"]
+                        for row in self.analytics.all_current(dataset_id)
+                    }
+                    await self.dispatcher.dispatch_changes(
+                        ctx.task,
+                        version=ctx.version,
+                        run_id=ctx.run_id,
+                        changes=changes,
+                        records_by_key=records_by_key,
+                    )
+                elif row_count == 0:
+                    await self.dispatcher.dispatch_alert(
+                        ctx.task,
+                        run_id=ctx.run_id,
+                        kind="empty_dataset",
+                        message=f"Збір завершився без записів (v{ctx.version})",
+                    )
+                if not quality_checks.passed:
+                    summary_msg = "; ".join(issue.message for issue in quality_checks.issues)
+                    await self.dispatcher.dispatch_alert(
+                        ctx.task,
+                        run_id=ctx.run_id,
+                        kind="quality_warning",
+                        message=f"v{ctx.version}: {summary_msg}",
+                    )
+            except Exception:  # noqa: BLE001 - delivery failure must not fail a completed run
+                logger.warning("delivery dispatch failed for run %s", ctx.run_id, exc_info=True)
 
     def _apply_tombstones(self, ctx: RunContext) -> None:
         """Mark records that a *complete* crawl no longer finds as removed (P1-03).
@@ -1097,6 +1165,21 @@ class PipelineRunner:
             )
         except Exception:  # pragma: no cover - never mask the original failure
             logger.exception("failed to persist run failure")
+
+    async def _notify_run_failed(self, task_id: str, run_id: str, exc: Exception) -> None:
+        if self.dispatcher is None:
+            return
+        try:
+            task = self.store.get_task(task_id)
+            if task is not None:
+                await self.dispatcher.dispatch_alert(
+                    task,
+                    run_id=run_id,
+                    kind="run_failed",
+                    message=f"{type(exc).__name__}: {str(exc)[:300]}",
+                )
+        except Exception:  # pragma: no cover - never mask the original failure
+            logger.warning("failed to dispatch run_failed alert for run %s", run_id, exc_info=True)
 
 
 def schema_from_spec(spec: TaskSpec) -> CssSchema | None:

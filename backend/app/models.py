@@ -370,3 +370,101 @@ class LLMCallRecord(BaseModel):
     tokens_out: int = 0
     usd: float = 0.0
     cached: bool = False
+
+
+class ScheduleInfo(BaseModel):
+    """Per-task cron schedule persisted in operational SQLite storage."""
+
+    task_id: str
+    cron: str
+    enabled: bool = True
+    catch_up: bool = True
+    acknowledge_high_risk: bool = False
+    reason: str = ""
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_run_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+DeliveryChannel = Literal["webhook", "telegram"]
+
+
+class DeliveryFilters(BaseModel):
+    """Deterministic filter criteria for outbound delta notifications."""
+
+    event_types: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    min_amount: float | None = None
+    max_amount: float | None = None
+    notify_on_error: bool = False
+
+
+class SubscriptionInfo(BaseModel):
+    """Per-task outbound delivery subscription (webhook or Telegram chat)."""
+
+    id: str
+    task_id: str
+    name: str = ""
+    channel: DeliveryChannel
+    target: str
+    secret: str = ""
+    filters: DeliveryFilters = Field(default_factory=DeliveryFilters)
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+class QualityCheckIssue(BaseModel):
+    """Single automated post-run quality invariant violation (P1-01)."""
+
+    code: Literal["row_count_drop", "required_field_empty"]
+    severity: Literal["warning", "error"] = "warning"
+    field: str | None = None
+    message: str
+    metric: float
+    threshold: float
+
+
+class QualityChecksReport(BaseModel):
+    """Automated post-run data quality report stored in dataset_versions.manifest."""
+
+    passed: bool = True
+    row_count: int = 0
+    observed_count: int | None = None
+    previous_row_count: int | None = None
+    drop_ratio: float | None = None
+    issues: list[QualityCheckIssue] = Field(default_factory=list)
+
+
+class EvalFieldMetrics(BaseModel):
+    """Precision/recall/F1/coverage computed for a single field over a gold dataset."""
+
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+    coverage: float = 0.0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+
+
+class EvalReport(BaseModel):
+    """Offline gold-set extraction evaluation report (P1-01)."""
+
+    gold_name: str = "inline"
+    passed: bool = False
+    min_f1: float = 0.8
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+    coverage: float = 0.0
+    cases: int = 0
+    records_expected: int = 0
+    records_extracted: int = 0
+    llm_fallback_pct: float = 0.0
+    usd_per_1k_records: float = 0.0
+    dataset_version: int | None = None
+    evaluated_at: datetime = Field(default_factory=utcnow)
+    fields: dict[str, EvalFieldMetrics] = Field(default_factory=dict)

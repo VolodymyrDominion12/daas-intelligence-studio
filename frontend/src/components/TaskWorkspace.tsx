@@ -9,7 +9,15 @@ import {
   statusClass,
   timeAgo,
 } from '../format'
-import type { ConfigResponse, EventInfo, RunKind, TaskDetail, ToastMessage } from '../types'
+import type {
+  ConfigResponse,
+  EvalReport,
+  EventInfo,
+  QualityChecksReport,
+  RunKind,
+  TaskDetail,
+  ToastMessage,
+} from '../types'
 import { CalibrationPanel } from './CalibrationPanel'
 import { DataGrid } from './DataGrid'
 import { DetailDrawer } from './DetailDrawer'
@@ -47,6 +55,11 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
   const spec = task.spec
   const dataset = detail.dataset.dataset
   const rows = dataset?.row_count ?? 0
+  const manifest = dataset?.manifest as
+    | { quality_checks?: QualityChecksReport; eval?: EvalReport }
+    | undefined
+  const qualityChecks = manifest?.quality_checks
+  const evalReport = manifest?.eval
   const activeRun = detail.active_run
   const lastRun = activeRun ?? task.last_run
   // Snapshot runs don't move data; keep collection numbers visible in the strip.
@@ -115,6 +128,22 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
             <span className={statusClass(task.status)}>{STATUS_LABELS[task.status] ?? task.status}</span>
             <span className="chip">v{dataset?.version ?? 0}</span>
             <span>{fmtNumber(rows)} рядків</span>
+            {qualityChecks && !qualityChecks.passed && (
+              <span
+                className={statusClass('failed')}
+                title={qualityChecks.issues.map((i) => i.message).join('; ')}
+              >
+                Якість: {qualityChecks.issues.length} попередж.
+              </span>
+            )}
+            {evalReport && (
+              <span
+                className={evalReport.passed ? 'chip' : statusClass('failed')}
+                title={`Gold eval (${evalReport.gold_name}): P=${Math.round(evalReport.precision * 100)}% R=${Math.round(evalReport.recall * 100)}%`}
+              >
+                Gold F1: {Math.round(evalReport.f1 * 100)}%
+              </span>
+            )}
             <span className="muted">
               оновлено {timeAgo(detail.dataset.freshness ?? task.updated_at)}
             </span>

@@ -63,6 +63,7 @@ def create_app(settings: Settings | None = None, *, studio_factory=None) -> Fast
             logger.warning("marked %s interrupted runs as failed", interrupted)
         app.state.studio = studio
         await studio.router.probe(timeout=1.5)
+        studio.start_scheduler()
         logger.info(
             "studio ready | storage=%s | llm=%s | fetch=%s | auth=%s",
             studio.paths.root,
