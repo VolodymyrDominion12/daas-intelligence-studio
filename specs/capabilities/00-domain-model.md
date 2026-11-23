@@ -3,7 +3,7 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
-| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py` |
+| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py` |
 | **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07 |
 | **Статус** | as-built v0.1 |
 
@@ -13,6 +13,7 @@
 |:---|:---|:---|:---|
 | Задача | `TaskInfo` + `TaskSpec` | SQLite `tasks.spec_json` | Що збираємо: колонки, seed-и, ліміти, збагачення |
 | Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання |
+| API-джерело | `ApiSourceSpec` | у `TaskSpec.api_source` | Декларативний мапінг JSON API, курсор, пагінація |
 | Запуск | `RunInfo` + `RunStats` | SQLite `runs` | Один прогін `calibrate / collect / enrich / snapshot` |
 | Подія | `EventInfo` | SQLite `events` | Аудит і живий журнал (SSE) |
 | Датасет | `DatasetInfo` | SQLite `datasets`, `dataset_versions` | Версії, маніфести, якість |
@@ -38,10 +39,10 @@
 
 ### REQ-DM-003 — Нормалізація seed URL
 `TaskSpec.seeds` **ПОВИНЕН** відкидати порожні значення, додавати `https://` до URL без схеми,
-канонізувати (`canonical_url`: lower-case хост без `www.`, без query і кінцевого `/`) і прибирати
-дублікати зі збереженням порядку.
+канонізувати (`canonical_url`: lower-case хост без `www.`, без query і кінцевого `/` для веб-задач;
+для задач з `api_source` query зберігається) і прибирати дублікати зі збереженням порядку.
 - **Перевірка (частково):** `tests/test_utils.py::test_url_helpers` — лише `canonical_url`;
-  валідатор `seeds` — прогалина
+  валідатор `seeds` для API — `tests/test_open_api_source.py::test_api_source_spec_validation_and_logged_out`
 
 ### REQ-DM-004 — Стабільний ключ запису (natural key)
 `record_key_for(payload)` **ПОВИНЕН** повертати детермінований ключ:
@@ -73,6 +74,14 @@
 `RunStats.merge` **ПОВИНЕН** сумувати числові поля і перезаписувати нечислові непорожніми.
 - **Перевірка:** — (прогалина)
 
+### REQ-DM-009 — Конфігурація режиму збору з відкритого JSON API
+`TaskSpec` і `CreateTaskRequest` **ПОВИННІ** підтримувати опційний декларативний `ApiSourceSpec`
+(з непорожнім `field_map`, шляхом `items_path`, `id_path`, пагінацією `next_page_path`/`cursor_path`/
+`cursor_param`, опційними `detail_url_template`/`record_url_template` та прапором `incremental`).
+Query-параметри в `seeds` зберігаються, коли задано `api_source`; шаблони URL проходять перевірку
+`assert_logged_out`.
+- **Перевірка:** `tests/test_open_api_source.py::test_api_source_spec_validation_and_logged_out`
+
 ## 3. Статуси
 
 **Задача (`TaskStatus`):** `draft` → (`calibrate`/`collect`/`enrich`) `running` →
@@ -100,6 +109,8 @@
 | `page_extracted` | debug | runner | Сторінка дала записи |
 | `no_records` | warning/debug | runner | Сторінка без записів |
 | `fetch_failed`, `job_failed` | warning/error | runner | Відмова завантаження / виняток у задачі черги |
+| `json_parse_failed` | warning | runner | Не вдалося розібрати JSON-відповідь API (`data.url`, `data.error`) |
+| `api_cursor_saved` | info | runner | Збережено інкрементальний курсор/URL API після успішної фіксації версії |
 | `robots_blocked` | warning | runner | Пропущено через robots.txt |
 | `limit_reached`, `llm_limit` | warning | runner | Ліміт сторінок / LLM-викликів |
 | `selector_healed` | info | runner | Схему перегенеровано після промаху |

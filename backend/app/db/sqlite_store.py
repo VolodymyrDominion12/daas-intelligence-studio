@@ -175,6 +175,18 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE api_state (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            next_cursor TEXT,
+            next_url TEXT,
+            last_modified TEXT,
+            updated_at TEXT NOT NULL
+        );
+        """,
+    ),
 ]
 
 
@@ -833,6 +845,39 @@ class OperationalStore:
             SourcePolicy.model_validate_json(row["payload_json"])
             for row in self._all("SELECT payload_json FROM source_registry ORDER BY domain")
         ]
+
+    # -- api state --------------------------------------------------------
+    def get_api_state(self, task_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT task_id, next_cursor, next_url, last_modified, updated_at"
+            " FROM api_state WHERE task_id = ?",
+            (task_id,),
+        )
+        return dict(row) if row else None
+
+    def save_api_state(
+        self,
+        task_id: str,
+        *,
+        next_cursor: str | None = None,
+        next_url: str | None = None,
+        last_modified: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO api_state(task_id, next_cursor, next_url, last_modified, updated_at)"
+                " VALUES (?,?,?,?,?)"
+                " ON CONFLICT(task_id) DO UPDATE SET"
+                " next_cursor = excluded.next_cursor,"
+                " next_url = excluded.next_url,"
+                " last_modified = COALESCE(excluded.last_modified, api_state.last_modified),"
+                " updated_at = excluded.updated_at",
+                (task_id, next_cursor, next_url, last_modified, iso()),
+            )
+
+    def reset_api_state(self, task_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM api_state WHERE task_id = ?", (task_id,))
 
     # -- aggregates -------------------------------------------------------
     def overview(self) -> dict[str, Any]:

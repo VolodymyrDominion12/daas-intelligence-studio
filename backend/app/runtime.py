@@ -23,7 +23,7 @@ from .discovery import build_search
 from .enrichment.registry import build_registry, enricher_catalog
 from .extraction.engine import ExtractionEngine
 from .llm.router import LLMRouter
-from .models import RunInfo, TaskInfo, TaskSpec
+from .models import ApiSourceSpec, RunInfo, TaskInfo, TaskSpec
 from .pipeline.calibration import Calibrator
 from .pipeline.planner import Planner
 from .pipeline.runner import PipelineRunner
@@ -120,12 +120,20 @@ class Studio:
     # tasks
     # ------------------------------------------------------------------
     async def create_task(
-        self, prompt: str, seeds: list[str], *, title: str | None = None
+        self,
+        prompt: str,
+        seeds: list[str],
+        *,
+        title: str | None = None,
+        api_source: ApiSourceSpec | None = None,
     ) -> TaskInfo:
         for seed in seeds:
             if seed and seed.strip():
                 assert_logged_out(seed.strip())
-        spec = await self.planner.plan(prompt, seeds, title=title)
+        if api_source is not None:
+            spec = await self.planner.plan(prompt, seeds, title=title, api_source=api_source)
+        else:
+            spec = await self.planner.plan(prompt, seeds, title=title)
         # Seeds discovered by search are validated too, before anything is persisted.
         dropped = [seed for seed in spec.seeds if login_violation(seed)]
         if dropped:
@@ -138,7 +146,11 @@ class Studio:
             task.id,
             "task_created",
             f"Задачу створено: {spec.title}",
-            data={"columns": [column.key for column in spec.columns], "llm": self.router.available},
+            data={
+                "columns": [column.key for column in spec.columns],
+                "llm": self.router.available,
+                "api_source": spec.api_source is not None,
+            },
         )
         self.store.add_event(
             task.id,
@@ -207,7 +219,11 @@ class Studio:
         acknowledged = self._compliance_gate(
             task, "collect", acknowledge_high_risk=acknowledge_high_risk, reason=reason
         )
-        if not skip_calibration and self.store.get_calibration(task_id) is None:
+        if (
+            not skip_calibration
+            and task.spec.api_source is None
+            and self.store.get_calibration(task_id) is None
+        ):
             raise RunConflict(
                 "Спершу запустіть калібрування на тестовій вибірці — це головна економія токенів"
             )

@@ -4,8 +4,8 @@
 |:---|:---|
 | **Код** | `backend/app/pipeline/planner.py`, `backend/app/presets.py`, `backend/app/discovery.py`, `backend/app/llm/prompts.py` (`PLANNER_SYSTEM`), `backend/app/runtime.py` (`Studio.create_task`, `update_task`) |
 | **API** | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `PATCH /api/tasks/{id}/limits`, `POST/DELETE /api/tasks/{id}/columns[/{key}]`, `DELETE /api/tasks/{id}` |
-| **CLI** | `daas task create --prompt … --seed …`, `daas task list`, `daas task show` |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py` |
+| **CLI** | `daas task create --prompt … --seed … [--api-source …]`, `daas task list`, `daas task show` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py` |
 | **Джерела** | `docs/01` модуль 1, `docs/03` §2 |
 | **Статус** | as-built v0.1 |
 
@@ -103,6 +103,13 @@ LLM) і `plan_ready` (`data.spec`).
 Неочікувана помилка планувальника **ПОВИННА** повертати 400 «Не вдалося побудувати план: …»;
 `ComplianceError` прокидається як є (403/428).
 - **Перевірка:** — (прогалина)
+
+### REQ-PLAN-012 — Шаблон задачі для відкритого API закупівель і аукціонів
+Планувальник **ПОВИНЕН** розпізнавати запит на збір із відкритого API тендерів/аукціонів (Prozorro
+та Prozorro.Продажі за доменами або ключовими словами) і формувати готовий набір колонок
+(`method="api_json"`) і `ApiSourceSpec` без участі LLM (`limits.max_depth = 0`) та без персональних
+даних (`pii="personal"`).
+- **Перевірка:** `tests/test_open_api_source.py::test_openprocurement_preset_builds_non_pii_api_spec`
 
 ## 4. Інваріанти
 - План завжди валідний `TaskSpec` (≥ 1 колонка, унікальні ключі) — інакше задача не створюється.

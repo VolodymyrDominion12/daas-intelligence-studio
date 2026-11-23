@@ -6,13 +6,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from ..models import FieldSpec, Limits, SourcePolicy, TaskSpec
+from ..models import ApiSourceSpec, FieldSpec, Limits, SourcePolicy, TaskSpec
 
 
 class CreateTaskRequest(BaseModel):
     prompt: str = Field(min_length=5, max_length=4000)
     seeds: list[str] = Field(default_factory=list, max_length=20)
     title: str | None = Field(default=None, max_length=80)
+    api_source: ApiSourceSpec | None = None
 
 
 class UpdateTaskRequest(BaseModel):

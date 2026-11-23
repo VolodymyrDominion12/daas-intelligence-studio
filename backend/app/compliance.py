@@ -286,14 +286,19 @@ class PolicyGuardFetcher:
                 return f"source registry: {policy.domain} is high-risk and not acknowledged"
         return None
 
-    async def fetch(self, url: str, *, force_refresh: bool = False) -> FetchResult:
+    async def fetch(
+        self, url: str, *, force_refresh: bool = False, allow_json: bool = False
+    ) -> FetchResult:
         from .scraping.fetcher import FetchResult
 
         reason = self.violation(url)
         if reason:
             self._report(url, reason)
             return FetchResult(kind="policy", error=reason)
-        result = await self.inner.fetch(url, force_refresh=force_refresh)
+        if allow_json:
+            result = await self.inner.fetch(url, force_refresh=force_refresh, allow_json=True)
+        else:
+            result = await self.inner.fetch(url, force_refresh=force_refresh)
         # Engines that follow redirects internally (or a cached page) end up on final_url.
         final_url = result.page.final_url if result.page is not None else None
         if final_url and final_url != url:

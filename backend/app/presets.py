@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from .models import EnrichmentSpec, FieldSpec, Limits, TaskSpec
+from .models import ApiSourceSpec, EnrichmentSpec, FieldSpec, Limits, TaskSpec
 
 
 def col(
@@ -214,6 +214,69 @@ def detect_preset(prompt: str) -> Preset:
     return best or PRESETS[-1]
 
 
+def _openprocurement_columns() -> list[FieldSpec]:
+    return [
+        col("tender_id", "ID закупівлі / лота", method="api_json"),
+        col("title", "Предмет / назва", method="api_json"),
+        col("name", "Замовник / організатор", method="api_json"),
+        col("edrpou", "ЄДРПОУ", method="api_json"),
+        col("cpv", "Код CPV", method="api_json"),
+        col("region", "Регіон", method="api_json"),
+        col("amount", "Очікувана вартість / старт", "number", method="api_json"),
+        col("currency", "Валюта", method="api_json"),
+        col("status", "Статус", method="api_json"),
+        col("modified_at", "Оновлено", "datetime", method="api_json"),
+        col("deadline", "Дедлайн", "datetime", method="api_json"),
+        col("url", "Посилання", "url", method="api_json"),
+    ]
+
+
+def _is_openprocurement_api(prompt: str, seeds: list[str]) -> bool:
+    lowered = (prompt or "").casefold()
+    joined_seeds = " ".join(seeds or []).casefold()
+    if any(host in joined_seeds for host in ("openprocurement.org", "openprocurement.local")):
+        return True
+    if any(token in lowered for token in ("openprocurement", "prozorro api", "prozorro.продажі api")):
+        return True
+    has_prozorro = any(token in lowered for token in ("prozorro", "prozzoro", "прозорро"))
+    has_api = any(token in lowered for token in ("api", "апі", "json"))
+    return has_prozorro and has_api
+
+
+def _default_openprocurement_source(seeds: list[str]) -> ApiSourceSpec:
+    seed = (seeds[0] if seeds else "").strip().rstrip("/")
+    base = seed.split("?", 1)[0] if seed else "https://public.api.openprocurement.org/api/2.5/tenders"
+    if not base.startswith(("http://", "https://")):
+        base = "https://" + base.lstrip("/")
+    is_sale = "prozorro.sale" in base or "auctions" in base
+    record_tpl = (
+        "https://prozorro.sale/auction/{id}" if is_sale else "https://prozorro.gov.ua/tender/{id}"
+    )
+    return ApiSourceSpec(
+        items_path="data",
+        id_path="id",
+        next_page_path="next_page.uri",
+        cursor_path="next_page.offset",
+        cursor_param="offset",
+        detail_url_template=f"{base}/{{id}}",
+        record_url_template=record_tpl,
+        incremental=True,
+        field_map={
+            "tender_id": "tenderID|auctionID|id",
+            "title": "title",
+            "name": "procuringEntity.name",
+            "edrpou": "procuringEntity.identifier.id",
+            "cpv": "items.0.classification.id",
+            "region": "procuringEntity.address.region|items.0.deliveryAddress.region",
+            "amount": "value.amount|minimalStep.amount",
+            "currency": "value.currency",
+            "status": "status",
+            "modified_at": "dateModified",
+            "deadline": "tenderPeriod.endDate|auctionPeriod.startDate",
+        },
+    )
+
+
 def build_spec(
     prompt: str,
     seeds: list[str],
@@ -222,7 +285,30 @@ def build_spec(
     sample_size: int,
     budget_usd: float,
     max_depth: int,
+    api_source: ApiSourceSpec | None = None,
 ) -> TaskSpec:
+    if api_source is None and _is_openprocurement_api(prompt, seeds):
+        api_source = _default_openprocurement_source(seeds)
+        columns = _openprocurement_columns()
+        title = _derive_title(prompt) or "Prozorro / OpenProcurement API"
+        return TaskSpec(
+            title=title[:60],
+            prompt=prompt,
+            entity="tender",
+            columns=columns,
+            seeds=seeds,
+            extraction="api_json",
+            api_source=api_source,
+            limits=Limits(
+                max_pages=max_pages,
+                max_depth=0,
+                budget_usd=budget_usd,
+                sample_size=sample_size,
+            ),
+            rationale="Офлайн-профіль OpenProcurement (Prozorro / Prozorro.Продажі) для відкритого JSON API.",
+            assumptions=["Використано декларативний JSON-мапінг без LLM і без персональних PII."],
+        )
+
     preset = detect_preset(prompt)
     columns = preset.columns()
     lowered = prompt.casefold()
@@ -282,12 +368,19 @@ def build_spec(
                 enrichment.append(EnrichmentSpec(enricher="site_audit", fields=fields))
 
     title = _derive_title(prompt) or preset.title
+    extraction_mode = "api_json" if api_source is not None else "auto"
+    if api_source is not None:
+        for column in columns:
+            if column.key in api_source.field_map:
+                column.method = "api_json"
     return TaskSpec(
         title=title[:60],
         prompt=prompt,
         entity=preset.entity,
         columns=columns,
         seeds=seeds,
+        extraction=extraction_mode,
+        api_source=api_source,
         enrichment=enrichment,
         limits=Limits(
             max_pages=max_pages,
@@ -297,7 +390,7 @@ def build_spec(
         ),
         rationale=f"Офлайн-шаблон «{preset.title}» на основі ключових слів запиту.",
         assumptions=["Схема згенерована локальним шаблоном; її можна відредагувати перед запуском."],
-        warning="LLM не налаштований — використано локальний шаблон схеми.",
+        warning=None if api_source is not None else "LLM не налаштований — використано локальний шаблон схеми.",
     )
 
 

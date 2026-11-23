@@ -48,7 +48,9 @@ class FixtureFetcher:
             return "site_alpha.html"
         return None
 
-    async def fetch(self, url: str, *, force_refresh: bool = False) -> FetchResult:
+    async def fetch(
+        self, url: str, *, force_refresh: bool = False, allow_json: bool = False
+    ) -> FetchResult:
         self.calls.append(url)
         fixture = self._resolve(url)
         if fixture is None:

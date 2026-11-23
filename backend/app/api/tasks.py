@@ -57,7 +57,9 @@ def list_tasks(studio: StudioDep) -> dict[str, Any]:
 @router.post("/tasks", status_code=201)
 async def create_task(payload: CreateTaskRequest, studio: StudioDep) -> dict[str, Any]:
     try:
-        task = await studio.create_task(payload.prompt, payload.seeds, title=payload.title)
+        task = await studio.create_task(
+            payload.prompt, payload.seeds, title=payload.title, api_source=payload.api_source
+        )
     except ComplianceError:
         raise
     except Exception as exc:  # noqa: BLE001 - planner errors are user-facing

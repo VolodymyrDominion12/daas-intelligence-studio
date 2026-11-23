@@ -2,8 +2,8 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/extraction/engine.py`, `backend/app/extraction/jsonld.py`, `backend/app/extraction/css.py`, `backend/app/extraction/llm_extractor.py`, `backend/app/extraction/base.py`, `backend/app/extraction/learner.py` (`fill_from_text`, `coerce_any`), `backend/app/scraping/page.py` (`extract_json_ld`) |
-| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py` |
+| **Код** | `backend/app/extraction/engine.py`, `backend/app/extraction/jsonld.py`, `backend/app/extraction/css.py`, `backend/app/extraction/api_json.py`, `backend/app/extraction/llm_extractor.py`, `backend/app/extraction/base.py`, `backend/app/extraction/learner.py` (`fill_from_text`, `coerce_any`), `backend/app/scraping/page.py` (`extract_json_ld`) |
+| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py`, `tests/test_open_api_source.py` |
 | **Джерела** | ADR-06, `docs/02` §3 |
 | **Статус** | as-built v0.1 |
 
@@ -79,6 +79,13 @@ LLM-екстрактор **ПОВИНЕН**: передавати сторінк
 `extract_links` **ПОВИНЕН** повертати абсолютні http(s)-URL того самого сайту без `mailto:` і
 навігаційного шуму.
 - **Перевірка:** `tests/test_extraction.py::test_links_are_absolute_and_filtered`
+
+### REQ-EXT-010 — Декларативна екстракція з JSON-відповіді
+`api_json.py` **ПОВИНЕН** детерміновано без LLM витягувати цілі пагінації/деталей та записи за
+`ApiSourceSpec` (dot-path з індексами та `|`-резервами), приводити значення до типів колонок,
+виставляти стабільний ключ `api:<id>` та `Provenance(method="api_json", confidence=0.98, verified=True)`.
+На невалідному JSON повертаються 0 записів і попередження без падіння прогону.
+- **Перевірка:** `tests/test_open_api_source.py::test_json_extractor_maps_fields_and_handles_broken_json`
 
 ## 4. Спостережувана поведінка / відкриті питання
 - `_is_usable` видаляє непридатні значення з `item`, але рахує мінімум «≥ 2» по копії **до**

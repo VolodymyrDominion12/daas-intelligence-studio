@@ -14,7 +14,7 @@ DType = Literal[
     "string", "number", "integer", "boolean", "url", "email", "phone", "datetime", "json", "array"
 ]
 PiiClass = Literal["none", "business_contact", "personal"]
-Method = Literal["json_ld", "css", "regex", "llm", "enrichment", "manual", "merge"]
+Method = Literal["json_ld", "css", "regex", "llm", "enrichment", "manual", "merge", "api_json"]
 RunKind = Literal["calibrate", "collect", "enrich", "snapshot", "prepare"]
 RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "partial"]
 TaskStatus = Literal["draft", "ready", "running", "done", "failed"]
@@ -89,6 +89,50 @@ class SourcePolicy(BaseModel):
     reviewed_at: datetime | None = None
 
 
+class ApiSourceSpec(BaseModel):
+    """Declarative configuration for a public REST JSON API source (D-02)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items_path: str = "data"
+    id_path: str = "id"
+    field_map: dict[str, str]
+    next_page_path: str | None = "next_page.uri"
+    cursor_path: str | None = "next_page.offset"
+    cursor_param: str = "offset"
+    detail_url_template: str | None = None
+    record_url_template: str | None = None
+    incremental: bool = True
+
+    @field_validator("field_map")
+    @classmethod
+    def _non_empty_field_map(cls, value: dict[str, str]) -> dict[str, str]:
+        cleaned = {
+            str(key).strip(): str(path).strip()
+            for key, path in value.items()
+            if str(key).strip() and str(path).strip()
+        }
+        if not cleaned:
+            raise ValueError("api_source.field_map must contain at least one field mapping")
+        return cleaned
+
+    @field_validator("detail_url_template", "record_url_template")
+    @classmethod
+    def _validate_url_template(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if not cleaned.startswith(("http://", "https://")):
+            raise ValueError("URL template must start with http:// or https://")
+        from .compliance import assert_logged_out
+
+        sample = cleaned.replace("{id}", "sample-id")
+        assert_logged_out(sample)
+        return cleaned
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -98,7 +142,8 @@ class TaskSpec(BaseModel):
     locale: str = "uk"
     columns: list[FieldSpec]
     seeds: list[str] = Field(default_factory=list)
-    extraction: Literal["auto", "json_ld", "css", "llm"] = "auto"
+    extraction: Literal["auto", "json_ld", "css", "llm", "api_json"] = "auto"
+    api_source: ApiSourceSpec | None = None
     enrichment: list[EnrichmentSpec] = Field(default_factory=list)
     limits: Limits = Field(default_factory=Limits)
     rationale: str = ""
@@ -106,28 +151,30 @@ class TaskSpec(BaseModel):
     source_policy: dict[str, SourcePolicy] = Field(default_factory=dict)
     warning: str | None = None
 
-    @field_validator("seeds")
-    @classmethod
-    def _clean_seeds(cls, seeds: list[str]) -> list[str]:
+    @model_validator(mode="after")
+    def _validate_spec(self) -> TaskSpec:
+        drop_query = self.api_source is None
         cleaned: list[str] = []
-        for seed in seeds:
+        for seed in self.seeds:
             seed = (seed or "").strip()
             if not seed:
                 continue
             if not seed.startswith(("http://", "https://")):
                 seed = "https://" + seed.lstrip("/")
-            canonical = canonical_url(seed)
+            canonical = canonical_url(seed, drop_query=drop_query)
             if canonical not in cleaned:
                 cleaned.append(canonical)
-        return cleaned
+        self.seeds = cleaned
 
-    @model_validator(mode="after")
-    def _unique_columns(self) -> TaskSpec:
         keys = [column.key for column in self.columns]
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate column keys in task spec")
         if not self.columns:
             raise ValueError("task spec needs at least one column")
+        if self.api_source is not None:
+            mapped = set(self.api_source.field_map) & set(keys)
+            if not mapped:
+                raise ValueError("api_source.field_map keys must match at least one task column")
         return self
 
     @property

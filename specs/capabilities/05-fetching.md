@@ -4,7 +4,7 @@
 |:---|:---|
 | **Код** | `backend/app/scraping/fetcher.py` (`HttpFetcher`, `PlaywrightFetcher`, `FetchResult`, `build_fetcher`), `backend/app/scraping/politeness.py` (`RobotsGate`, `DomainRateLimiter`, `classify_status`), `backend/app/scraping/page.py`, `backend/app/storage/raw_cache.py`, `backend/app/utils.py` (`assert_public_url`, `canonical_url`) |
 | **API** | `POST /api/maintenance/purge-cache?older_than_days=N` |
-| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/conftest.py` (`FixtureFetcher`) |
+| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/test_open_api_source.py`, `tests/conftest.py` (`FixtureFetcher`) |
 | **Джерела** | ADR-03, ADR-09, `docs/02` §2.1 |
 | **Статус** | as-built v0.1 |
 
@@ -55,10 +55,12 @@ empty, policy}`, `status`, `error`. `page is None` ⇔ відмова (крім 
 `Retry-After` (≤ 15 с).
 - **Перевірка:** — (прогалина)
 
-### REQ-FETCH-006 — Лише HTML, обмежений розмір
-Відповідь **ПОВИННА** відхилятися як `permanent`, якщо `Content-Type` не містить `html`/`xml`;
-тіло обрізається до 6 МБ; порожнє тіло → `empty`.
-- **Перевірка:** — (прогалина)
+### REQ-FETCH-006 — Допустимий Content-Type та обмежений розмір
+За замовчуванням відповідь **ПОВИННА** відхилятися як `permanent`, якщо `Content-Type` не містить
+`html`/`xml`; при явному `allow_json=True` (режим JSON API) дозволяється також `application/json`
+та `application/*+json`. Тіло обрізається до 6 МБ; порожнє тіло → `empty`.
+- **Перевірка:** `tests/test_open_api_source.py::test_fetcher_json_mode_and_compliance_guard`
+  (JSON дозволено при `allow_json=True` і відхилено без нього; ліміт 6 МБ — прогалина)
 
 ### REQ-FETCH-007 — Raw-кеш (bronze layer)
 Кожна успішна сторінка **ПОВИННА** зберігатися zstd-стиснутим JSON під sha256 від запитаного URL і
@@ -85,6 +87,12 @@ empty, policy}`, `status`, `error`. `page is None` ⇔ відмова (крім 
 `httpx.MockTransport`; жоден тест не відкриває мережеве з'єднання (Конституція, ст. III).
 - **Перевірка:** `tests/test_learner.py::test_fixture_files_exist`
 
+### REQ-FETCH-011 — Підтримка JSON-відповідей під тим самим комплаєнс-захистом
+У режимі `allow_json=True` завантажувач **ПОВИНЕН** без винятків зберігати перевірки SSRF,
+редирект-guard, реєстру джерел (`PolicyGuardFetcher`), logged-out, `robots.txt`, rate-limit,
+обмеження розміру (6 МБ) і raw-кешу.
+- **Перевірка:** `tests/test_open_api_source.py::test_fetcher_json_mode_and_compliance_guard`
+
 ## 4. Спостережувана поведінка / відкриті питання
 - `Crawl-delay` зберігається під `urlsplit(url).hostname`, а `wait_turn` шукає RPS під
   `normalize_domain(url)` (без `www.`). Для хостів `www.*` затримка з robots.txt, схоже, не
@@ -93,4 +101,4 @@ empty, policy}`, `status`, `error`. `page is None` ⇔ відмова (крім 
   query, кешуються окремо. Бажано?
 
 ## 5. Прогалини
-REQ-FETCH-003…006, 009 — немає тестів реального `HttpFetcher` з `httpx.MockTransport`.
+REQ-FETCH-003…005, 006 (ліміт 6 МБ), 009 — немає тестів реального `HttpFetcher` з `httpx.MockTransport`.

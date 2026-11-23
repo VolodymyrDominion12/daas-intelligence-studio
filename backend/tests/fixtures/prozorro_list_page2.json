@@ -1,0 +1,7 @@
+{
+  "data": [],
+  "next_page": {
+    "offset": "2026-11-23T09:45:00+02:00",
+    "uri": "http://api.openprocurement.local/api/2.5/tenders?offset=2026-11-23T09:45:00"
+  }
+}

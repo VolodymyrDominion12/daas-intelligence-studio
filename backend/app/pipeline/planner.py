@@ -11,6 +11,7 @@ from ..llm.base import LLMBudget, LLMRequest
 from ..llm.prompts import PLANNER_SYSTEM, planner_user
 from ..llm.router import LLMRouter
 from ..models import (
+    ApiSourceSpec,
     EnrichmentSpec,
     FieldSpec,
     Limits,
@@ -50,6 +51,7 @@ class Planner:
         budget: LLMBudget | None = None,
         allow_discovery: bool = True,
         run_id: str | None = None,
+        api_source: ApiSourceSpec | None = None,
     ) -> TaskSpec:
         spec = build_spec(
             prompt,
@@ -58,9 +60,10 @@ class Planner:
             sample_size=self.settings.sample_size,
             budget_usd=self.settings.llm_budget_usd,
             max_depth=self.settings.max_depth,
+            api_source=api_source,
         )
         llm_spec: TaskSpec | None = None
-        if self.router.available:
+        if spec.api_source is None and self.router.available:
             self.router.bind(task_id=None, run_id=run_id, budget_usd=self.settings.llm_budget_usd)
             llm_spec = await self._plan_with_llm(prompt, seeds, budget=budget)
         if llm_spec is not None:
@@ -82,7 +85,7 @@ class Planner:
             )
         spec.limits = Limits(
             max_pages=self.settings.max_pages_per_run,
-            max_depth=self.settings.max_depth,
+            max_depth=0 if spec.api_source is not None else self.settings.max_depth,
             budget_usd=self.settings.llm_budget_usd,
             sample_size=self.settings.sample_size,
             per_domain_rps=self.settings.per_domain_rps,

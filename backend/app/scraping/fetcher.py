@@ -54,7 +54,9 @@ class FetchResult:
 class Fetcher(Protocol):
     name: str
 
-    async def fetch(self, url: str, *, force_refresh: bool = False) -> FetchResult: ...
+    async def fetch(
+        self, url: str, *, force_refresh: bool = False, allow_json: bool = False
+    ) -> FetchResult: ...
 
     async def aclose(self) -> None: ...
 
@@ -94,7 +96,9 @@ class HttpFetcher:
         await self._client.aclose()
         await self.robots.aclose()
 
-    async def fetch(self, url: str, *, force_refresh: bool = False) -> FetchResult:
+    async def fetch(
+        self, url: str, *, force_refresh: bool = False, allow_json: bool = False
+    ) -> FetchResult:
         try:
             assert_public_url(url, allow_private=self.settings.allow_private_network)
         except UnsafeUrlError as exc:
@@ -117,7 +121,7 @@ class HttpFetcher:
         last_error: str | None = None
         for attempt in range(self.settings.max_retries + 1):
             try:
-                result = await self._attempt(url)
+                result = await self._attempt(url, allow_json=allow_json)
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt < self.settings.max_retries:
@@ -133,14 +137,15 @@ class HttpFetcher:
             await asyncio.sleep(min(15.0, sleep_for))
         return FetchResult(kind="transient", error=last_error)
 
-    async def _attempt(self, url: str) -> FetchResult:
+    async def _attempt(self, url: str, *, allow_json: bool = False) -> FetchResult:
         current = url
+        req_headers = {"Accept": "application/json, */*;q=0.8"} if allow_json else None
         async with self.limiter.global_sem, self.limiter.domain_slot(url):
             for _hop in range(REDIRECT_LIMIT + 1):
                 await self.limiter.wait_turn(current)
                 started = time.monotonic()
                 try:
-                    response = await self._client.get(current)
+                    response = await self._client.get(current, headers=req_headers)
                 except httpx.HTTPError as exc:
                     return FetchResult(kind="transient", error=f"{type(exc).__name__}: {exc}")
                 elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -184,7 +189,10 @@ class HttpFetcher:
                                        error=f"HTTP {response.status_code}")
 
                 content_type = response.headers.get("content-type", "")
-                if "html" not in content_type and "xml" not in content_type:
+                lowered_ct = content_type.lower()
+                is_html_xml = "html" in lowered_ct or "xml" in lowered_ct
+                is_json = "application/json" in lowered_ct or "+json" in lowered_ct
+                if not (is_html_xml or (allow_json and is_json)):
                     return FetchResult(
                         kind="permanent",
                         status=response.status_code,
@@ -192,18 +200,33 @@ class HttpFetcher:
                     )
 
                 raw = response.content[:FETCH_MAX_BYTES]
-                html = _decode(raw, response.headers.get("content-type", ""))
-                if not html.strip():
+                body = _decode(raw, response.headers.get("content-type", ""))
+                if not body.strip():
                     return FetchResult(kind="empty", status=response.status_code,
                                        error="empty response body")
-                page = self._build_page(
-                    url=url,
-                    final_url=str(response.url),
-                    status=response.status_code,
-                    html=html,
-                    headers=dict(response.headers),
-                    elapsed_ms=elapsed_ms,
-                )
+                if is_json and not is_html_xml:
+                    page = PageContent(
+                        url=url,
+                        final_url=str(response.url),
+                        status_code=response.status_code,
+                        html=body,
+                        text=body,
+                        markdown="",
+                        content_hash=hash_text(body),
+                        fetched_at=utcnow(),
+                        engine=self.name,
+                        headers={key.lower(): value for key, value in response.headers.items()},
+                        elapsed_ms=elapsed_ms,
+                    )
+                else:
+                    page = self._build_page(
+                        url=url,
+                        final_url=str(response.url),
+                        status=response.status_code,
+                        html=body,
+                        headers=dict(response.headers),
+                        elapsed_ms=elapsed_ms,
+                    )
                 if self.cache is not None:
                     self.cache.put(page)
                 return FetchResult(page=page, status=response.status_code)

@@ -1,0 +1,4 @@
+# Auto-load project SDD rules and invariants into Aider context.
+read:
+  - AGENTS.md
+  - specs/constitution.md

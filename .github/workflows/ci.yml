@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --extra dev
+      - name: SDD specs-check
+        run: uv run pytest -q --noconftest tests/test_specs_traceability.py
       - run: uv run ruff check app tests
       - run: uv run pytest -q
 

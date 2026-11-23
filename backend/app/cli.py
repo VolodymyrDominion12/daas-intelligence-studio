@@ -132,17 +132,38 @@ def task_create(
     prompt: Annotated[str, typer.Option(help="Бізнес-запит природною мовою")],
     seed: Annotated[list[str] | None, typer.Option("--seed", help="Стартовий URL (можна кілька)")] = None,
     title: Annotated[str, typer.Option(help="Коротка назва")] = "",
+    api_source: Annotated[
+        str, typer.Option("--api-source", help="JSON або шлях до JSON-конфігурації ApiSourceSpec")
+    ] = "",
 ) -> None:
     """Створити задачу: промпт → схема колонок + джерела."""
+    from .models import ApiSourceSpec
+
+    parsed_api_source: ApiSourceSpec | None = None
+    if api_source.strip():
+        candidate = Path(api_source.strip())
+        raw_api = candidate.read_text(encoding="utf-8") if candidate.is_file() else api_source
+        parsed_api_source = ApiSourceSpec.model_validate_json(raw_api)
+
     async def run() -> None:
         studio = _studio()
         try:
-            task = await studio.create_task(prompt, seed or [], title=title or None)
+            task = await studio.create_task(
+                prompt, seed or [], title=title or None, api_source=parsed_api_source
+            )
             typer.echo(f"task {task.id} | {task.title} | entity={task.spec.entity}")
             for column in task.spec.columns:
-                flag = "AI" if column.is_ai else ("ENR" if column.method == "enrichment" else "CSS")
+                if column.is_ai:
+                    flag = "AI"
+                elif column.method == "enrichment":
+                    flag = "ENR"
+                elif column.method == "api_json":
+                    flag = "API"
+                else:
+                    flag = "CSS"
                 typer.echo(f"  [{flag}] {column.key:<20} {column.dtype:<9} {column.title}")
-            typer.echo(f"\nnext: daas calibrate {task.id}")
+            next_cmd = "collect" if task.spec.api_source is not None else "calibrate"
+            typer.echo(f"\nnext: daas {next_cmd} {task.id}")
         finally:
             await studio.aclose()
 

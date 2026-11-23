@@ -5,7 +5,7 @@
 | **Код** | `backend/app/pipeline/calibration.py` (`Calibrator`), `backend/app/extraction/learner.py`, `backend/app/extraction/synonyms.py`, `backend/app/pipeline/runner.py` (`PipelineRunner.calibrate`) |
 | **API** | `POST /api/tasks/{id}/calibrate?force&acknowledge_high_risk&reason`, `GET /api/tasks/{id}/calibration` |
 | **CLI** | `daas calibrate <id> [--ack-high-risk --reason "…"]` |
-| **Тести** | `tests/test_learner.py`, `tests/test_api_flow.py` |
+| **Тести** | `tests/test_learner.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py` |
 | **Джерела** | `docs/01` модуль 2 (двофазний парсинг), ADR-06 |
 | **Статус** | as-built v0.1 |
 
@@ -68,10 +68,12 @@
 Порожня вибірка дає підказку, що seed має бути сторінкою зі списком/картками.
 - **Перевірка:** `tests/test_api_flow.py::test_full_pipeline` (`succeeded|partial`, звіт доступний)
 
-### REQ-CAL-008 — Збір вимагає калібрування
+### REQ-CAL-008 — Збір вимагає калібрування (крім декларативного JSON API)
 `POST /run` без збереженого калібрування **ПОВИНЕН** повертати 409 «Спершу запустіть
-калібрування…», якщо не передано `skip_calibration=true`.
-- **Перевірка:** `tests/test_api_flow.py::test_full_pipeline` (`refused.status_code == 409`)
+калібрування…», якщо не передано `skip_calibration=true`, крім задач із налаштованим
+декларативним `ApiSourceSpec`, для яких калібрування є опційним і збір дозволяється одразу.
+- **Перевірка:** `tests/test_api_flow.py::test_full_pipeline` (`refused.status_code == 409`),
+  `tests/test_open_api_source.py::test_api_collection_pagination_cursor_and_failure_safety` (API без калібрування)
 
 ## 3. Інваріанти
 - Калібрування не пише записи в DuckDB і не створює версію датасету.

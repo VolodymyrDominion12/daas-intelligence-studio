@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..compliance import login_violation
 from ..config import Settings
@@ -15,6 +16,7 @@ from ..db.duckdb_store import AnalyticsStore, dataset_slug, detect_price_fields
 from ..db.sqlite_store import OperationalStore
 from ..enrichment.ai_column import AiColumns
 from ..enrichment.base import EnrichmentContext, merge_payload, provenance_for
+from ..extraction.api_json import extract_json_list_targets, extract_json_records
 from ..extraction.engine import ExtractionEngine
 from ..extraction.learner import learn_schema, schema_signature
 from ..llm.base import LLMBudget
@@ -36,6 +38,13 @@ from ..utils import iso, normalize_domain, unique, utcnow
 from .calibration import Calibrator
 
 logger = logging.getLogger(__name__)
+
+
+def _with_query_param(url: str, key: str, value: str) -> str:
+    parts = urlsplit(url)
+    pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != key]
+    pairs.append((key, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs), ""))
 
 
 @dataclass
@@ -61,6 +70,11 @@ class RunContext:
     # records. A record may be judged missing only if all its known sources are in here.
     checked_sources: set[str] = field(default_factory=set)
     full_crawl: bool = False
+    # API incremental collection state
+    api_list_failed: bool = False
+    api_next_cursor: str | None = None
+    api_next_url: str | None = None
+    seen_api_urls: set[str] = field(default_factory=set)
 
 
 class PipelineRunner:
@@ -147,15 +161,24 @@ class PipelineRunner:
             if counts["total"] == 0:
                 if not spec.seeds:
                     raise ValueError("Немає стартових URL — спершу додайте seed URL до задачі")
-                self.store.enqueue_urls(
-                    run_id, task_id, [(url, 0, None) for url in spec.seeds]
-                )
+                if spec.api_source is not None:
+                    start_urls = self._api_initial_urls(task_id, spec)
+                    total = self.store.enqueue_urls(
+                        run_id, task_id, [(url, 0, None) for url in start_urls], kind="api_list"
+                    )
+                    ctx.seen_api_urls.update(start_urls)
+                else:
+                    start_urls = list(spec.seeds)
+                    total = self.store.enqueue_urls(
+                        run_id, task_id, [(url, 0, None) for url in start_urls]
+                    )
+                ctx.stats.urls_total = total
                 self.store.add_event(
                     task_id,
                     "run_started",
-                    f"Збір запущено: {len(spec.seeds)} seed URL, версія датасету {version}",
+                    f"Збір запущено: {len(start_urls)} seed URL, версія датасету {version}",
                     run_id=run_id,
-                    data={"version": version, "seeds": spec.seeds},
+                    data={"version": version, "seeds": start_urls},
                 )
 
             limit = spec.limits.max_pages
@@ -214,11 +237,58 @@ class PipelineRunner:
 
             self._apply_tombstones(ctx)
             await self._finish_dataset(ctx, status_override=None)
+            self._save_api_cursor(ctx)
         except Exception as exc:
             logger.exception("collect failed")
             self.rollback_removals(run_id)
             self._fail(task_id, run_id, exc)
             raise
+
+    def _api_initial_urls(self, task_id: str, spec: TaskSpec) -> list[str]:
+        api_source = spec.api_source
+        if api_source is not None and api_source.incremental:
+            state = self.store.get_api_state(task_id)
+            if state:
+                saved_url = state.get("next_url")
+                if saved_url and login_violation(saved_url) is None:
+                    return [saved_url]
+                saved_cursor = state.get("next_cursor")
+                if saved_cursor and api_source.cursor_param and spec.seeds:
+                    return [_with_query_param(spec.seeds[0], api_source.cursor_param, saved_cursor)]
+        return list(spec.seeds)
+
+    def _save_api_cursor(self, ctx: RunContext) -> None:
+        if ctx.spec.api_source is None or ctx.api_list_failed:
+            return
+        if not (ctx.api_next_cursor or ctx.api_next_url):
+            return
+        final_run = self.store.get_run(ctx.run_id)
+        final_counts = self.store.job_counts(ctx.run_id)
+        aborted = any(note.startswith(("run cancelled", "queue stalled")) for note in ctx.notes)
+        if (
+            final_run is None
+            or final_run.status != "succeeded"
+            or final_counts["failed"] > 0
+            or final_counts["skipped"] > 0
+            or aborted
+        ):
+            return
+        self.store.save_api_state(
+            ctx.task.id,
+            next_cursor=ctx.api_next_cursor,
+            next_url=ctx.api_next_url,
+        )
+        self.store.add_event(
+            ctx.task.id,
+            "api_cursor_saved",
+            "Збережено курсор API для наступного інкрементального збору",
+            run_id=ctx.run_id,
+            level="info",
+            data={
+                "cursor": ctx.api_next_cursor,
+                "next_url": ctx.api_next_url,
+            },
+        )
 
     async def _process_job(self, job: dict, ctx: RunContext) -> None:
         try:
@@ -227,6 +297,8 @@ class PipelineRunner:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad page must not kill the run
             logger.exception("job %s failed", job.get("url"))
+            if job.get("kind") == "api_list":
+                ctx.api_list_failed = True
             ctx.stats.pages_failed += 1
             self.store.fail_job(job["id"], f"{type(exc).__name__}: {exc}", retryable=False)
             self.store.add_event(
@@ -237,7 +309,15 @@ class PipelineRunner:
 
     async def _process_job_inner(self, job: dict, ctx: RunContext) -> None:
         url = job["url"]
-        result = await self.fetcher.fetch(url)
+        kind = job.get("kind") or "fetch"
+        if kind in {"api_list", "api_detail"}:
+            result = await self.fetcher.fetch(
+                url,
+                force_refresh=(kind == "api_list"),
+                allow_json=True,
+            )
+        else:
+            result = await self.fetcher.fetch(url)
         page = result.page
         if page is None:
             await self._handle_fetch_failure(job, result, ctx)
@@ -246,12 +326,19 @@ class PipelineRunner:
         ctx.stats.pages_fetched += 1
         if page.from_cache:
             ctx.stats.pages_cached += 1
-        await self._extract_page(page, job, ctx)
+        if kind == "api_list":
+            await self._process_api_list(page, job, ctx)
+        elif kind == "api_detail":
+            await self._process_api_detail(page, job, ctx)
+        else:
+            await self._extract_page(page, job, ctx)
         self.store.complete_job(job["id"], status="done")
 
     async def _handle_fetch_failure(self, job: dict, result, ctx: RunContext) -> None:
         task_id = ctx.task.id
         if result.kind == "robots":
+            if job.get("kind") == "api_list":
+                ctx.api_list_failed = True
             ctx.stats.robots_blocked += 1
             self.store.complete_job(job["id"], status="skipped", error=result.error)
             self.store.add_event(
@@ -260,17 +347,188 @@ class PipelineRunner:
             )
             return
         if result.kind == "policy":
+            if job.get("kind") == "api_list":
+                ctx.api_list_failed = True
             # The fetch guard already wrote a redacted compliance_blocked event.
             self.store.complete_job(job["id"], status="skipped", error=result.error)
             return
         ctx.stats.pages_failed += 1
         retryable = result.kind in {"transient"}
         status = self.store.fail_job(job["id"], result.error or result.kind, retryable=retryable)
+        if job.get("kind") == "api_list" and status == "failed":
+            ctx.api_list_failed = True
         level = "warning" if result.kind in {"blocked", "transient"} else "error"
         self.store.add_event(
             task_id, "fetch_failed", f"{job['url']}: {result.error or result.kind} [{status}]",
             run_id=ctx.run_id, level=level, data={"kind": result.kind, "status": status},
         )
+
+    def _persist_records(
+        self,
+        records: list[ExtractedRecord],
+        page: PageContent,
+        job: dict,
+        ctx: RunContext,
+        *,
+        strategy: str,
+        confidence: float = 1.0,
+        llm_cost_usd: float = 0.0,
+    ) -> None:
+        if not page.from_cache:
+            # Fresh page that yielded records: it really was checked in this run. Pages that
+            # yield nothing (broken layout?) or come from cache never count as evidence.
+            ctx.checked_sources.update({page.url, page.final_url or page.url, job["url"]})
+        for record in records:
+            ctx.seen_keys.add(record.record_key)
+            record = self._merge_with_existing(record, ctx)
+            self.analytics.append_records(
+                ctx.dataset_id, ctx.version, ctx.run_id, [record]
+            )
+            if record.record_key in ctx.known_keys:
+                ctx.stats.records_updated += 1
+            else:
+                ctx.stats.records_new += 1
+                ctx.known_keys.add(record.record_key)
+            ctx.existing[record.record_key] = {
+                "payload": record.payload,
+                "provenance": {
+                    key: value.model_dump(mode="json")
+                    for key, value in record.provenance.items()
+                },
+            }
+
+        self.store.add_event(
+            ctx.task.id, "page_extracted",
+            f"{len(records)} записів ← {page.final_url or page.url} [{strategy}]",
+            run_id=ctx.run_id, level="debug",
+            data={
+                "strategy": strategy,
+                "confidence": confidence,
+                "llm_usd": llm_cost_usd,
+                "cached": page.from_cache,
+            },
+        )
+
+    async def _process_api_list(self, page: PageContent, job: dict, ctx: RunContext) -> None:
+        api_source = ctx.spec.api_source
+        if api_source is None:
+            await self._extract_page(page, job, ctx)
+            return
+
+        source_url = page.final_url or page.url
+        targets, next_url, cursor, warnings = extract_json_list_targets(page.html, api_source)
+        if warnings:
+            ctx.api_list_failed = True
+            self.store.add_event(
+                ctx.task.id,
+                "json_parse_failed",
+                f"Помилка розбору JSON списку: {source_url}",
+                run_id=ctx.run_id,
+                level="warning",
+                data={"url": source_url, "error": warnings[0]},
+            )
+            return
+
+        if cursor:
+            ctx.api_next_cursor = cursor
+        if next_url:
+            ctx.api_next_url = next_url
+        elif cursor and api_source.cursor_param and ctx.spec.seeds:
+            candidate = _with_query_param(ctx.spec.seeds[0], api_source.cursor_param, cursor)
+            if candidate != job["url"]:
+                ctx.api_next_url = candidate
+                next_url = candidate
+
+        if api_source.detail_url_template:
+            detail_urls = [
+                detail_url
+                for _item_id, detail_url in targets
+                if detail_url and login_violation(detail_url) is None
+            ]
+            if detail_urls:
+                queued = self.store.job_counts(ctx.run_id)
+                remaining = max(0, ctx.spec.limits.max_pages - queued["total"])
+                batch = detail_urls[:remaining]
+                if batch:
+                    total = self.store.enqueue_urls(
+                        ctx.run_id,
+                        ctx.task.id,
+                        [(u, job["depth"] + 1, source_url) for u in batch],
+                        kind="api_detail",
+                    )
+                    ctx.stats.urls_total = total
+        else:
+            records, rec_warnings = extract_json_records(page.html, ctx.spec, source_url)
+            if rec_warnings:
+                ctx.api_list_failed = True
+                self.store.add_event(
+                    ctx.task.id,
+                    "json_parse_failed",
+                    f"Помилка розбору JSON записів: {source_url}",
+                    run_id=ctx.run_id,
+                    level="warning",
+                    data={"url": source_url, "error": rec_warnings[0]},
+                )
+                return
+            ctx.strategies["api_json"] += 1
+            if records:
+                self._persist_records(
+                    records, page, job, ctx, strategy="api_json", confidence=0.98
+                )
+            else:
+                self.store.add_event(
+                    ctx.task.id,
+                    "no_records",
+                    f"0 записів: {source_url}",
+                    run_id=ctx.run_id,
+                    level="debug",
+                    data={"strategy": "api_json"},
+                )
+
+        if (
+            targets
+            and next_url
+            and next_url not in ctx.seen_api_urls
+            and next_url not in {job["url"], source_url}
+            and login_violation(next_url) is None
+        ):
+            queued = self.store.job_counts(ctx.run_id)
+            remaining = max(0, ctx.spec.limits.max_pages - queued["total"])
+            if remaining > 0:
+                ctx.seen_api_urls.add(next_url)
+                total = self.store.enqueue_urls(
+                    ctx.run_id,
+                    ctx.task.id,
+                    [(next_url, job["depth"] + 1, source_url)],
+                    kind="api_list",
+                )
+                ctx.stats.urls_total = total
+
+    async def _process_api_detail(self, page: PageContent, job: dict, ctx: RunContext) -> None:
+        source_url = page.final_url or page.url
+        records, warnings = extract_json_records(page.html, ctx.spec, source_url)
+        if warnings:
+            self.store.add_event(
+                ctx.task.id,
+                "json_parse_failed",
+                f"Помилка розбору JSON картки: {source_url}",
+                run_id=ctx.run_id,
+                level="warning",
+                data={"url": source_url, "error": warnings[0]},
+            )
+            return
+        ctx.strategies["api_json"] += 1
+        if not records:
+            self.store.add_event(
+                ctx.task.id,
+                "no_records",
+                f"0 записів: {source_url}",
+                run_id=ctx.run_id,
+                level="debug",
+                data={"strategy": "api_json"},
+            )
+            return
+        self._persist_records(records, page, job, ctx, strategy="api_json", confidence=0.98)
 
     async def _extract_page(self, page: PageContent, job: dict, ctx: RunContext) -> None:
         spec = ctx.spec
@@ -322,39 +580,14 @@ class PipelineRunner:
             await self._expand(page, job, ctx, empty=True)
             return
 
-        if not page.from_cache:
-            # Fresh page that yielded records: it really was checked in this run. Pages that
-            # yield nothing (broken layout?) or come from cache never count as evidence.
-            ctx.checked_sources.update({page.url, page.final_url or page.url, job["url"]})
-        for record in records:
-            ctx.seen_keys.add(record.record_key)
-            record = self._merge_with_existing(record, ctx)
-            self.analytics.append_records(
-                ctx.dataset_id, ctx.version, ctx.run_id, [record]
-            )
-            if record.record_key in ctx.known_keys:
-                ctx.stats.records_updated += 1
-            else:
-                ctx.stats.records_new += 1
-                ctx.known_keys.add(record.record_key)
-            ctx.existing[record.record_key] = {
-                "payload": record.payload,
-                "provenance": {
-                    key: value.model_dump(mode="json")
-                    for key, value in record.provenance.items()
-                },
-            }
-
-        self.store.add_event(
-            ctx.task.id, "page_extracted",
-            f"{len(records)} записів ← {page.final_url or page.url} [{outcome.strategy}]",
-            run_id=ctx.run_id, level="debug",
-            data={
-                "strategy": outcome.strategy,
-                "confidence": outcome.confidence,
-                "llm_usd": outcome.llm_cost_usd,
-                "cached": page.from_cache,
-            },
+        self._persist_records(
+            records,
+            page,
+            job,
+            ctx,
+            strategy=outcome.strategy,
+            confidence=outcome.confidence,
+            llm_cost_usd=outcome.llm_cost_usd,
         )
         await self._expand(page, job, ctx, empty=False, records_count=len(records))
 
@@ -668,6 +901,17 @@ class PipelineRunner:
         * never more than ``tombstone_max_ratio`` of the dataset at once;
         * only if the record's revision is unchanged since it was judged missing.
         """
+        if ctx.spec.api_source is not None and ctx.spec.api_source.incremental:
+            ctx.full_crawl = False
+            self.store.add_event(
+                ctx.task.id,
+                "tombstones_skipped",
+                "Видалені записи не позначались: інкрементальний режим API",
+                run_id=ctx.run_id,
+                level="debug",
+            )
+            return
+
         counts = self.store.job_counts(ctx.run_id)
         remaining = counts["queued"] + counts["leased"]
         incomplete = [

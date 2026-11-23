@@ -1,8 +1,11 @@
 # AGENTS.md — інструкції для всіх AI-агентів і людей-контриб'юторів
 
-> Цей файл читають Claude Code (через `CLAUDE.md`), Codex, Cursor, GitHub Copilot, Gemini CLI,
-> Aider та інші агенти. Він **обов'язковий**. Якщо інструкція тут суперечить звичці агента —
-> перемагає цей файл.
+> Цей файл — єдине джерело правил для всіх AI-агентів: Claude Code (`CLAUDE.md`, `.claude/commands/`),
+> Codex, Cursor (`.cursor/rules/`), GitHub Copilot (`.github/copilot-instructions.md`), Gemini /
+> Antigravity (`GEMINI.md`), JetBrains Junie (`.junie/guidelines.md`), JetBrains AI Assistant
+> (`.aiassistant/rules/`), Windsurf (`.windsurf/rules/`), Cline / Roo Code (`.clinerules/`),
+> Aider (`.aider.conf.yml`) та інших. Він **обов'язковий**. Якщо інструкція тут суперечить звичці
+> агента — перемагає цей файл.
 
 ## 0. Головне правило: Spec-Driven Development
 

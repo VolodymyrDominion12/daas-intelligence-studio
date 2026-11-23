@@ -1,0 +1,34 @@
+{
+  "data": {
+    "id": "tender-001",
+    "tenderID": "UA-2026-11-23-000101-a",
+    "title": "Послуги з модернізації серверної інфраструктури",
+    "status": "active.tendering",
+    "dateModified": "2026-11-23T09:15:00+02:00",
+    "value": {
+      "amount": 1250000.0,
+      "currency": "UAH"
+    },
+    "procuringEntity": {
+      "name": "КП Київський центр інформаційних технологій",
+      "identifier": {
+        "id": "12345678",
+        "scheme": "UA-EDR"
+      },
+      "address": {
+        "region": "м. Київ"
+      }
+    },
+    "items": [
+      {
+        "classification": {
+          "id": "72000000-5",
+          "description": "Послуги у сфері інформаційних технологій"
+        }
+      }
+    ],
+    "tenderPeriod": {
+      "endDate": "2026-12-05T18:00:00+02:00"
+    }
+  }
+}

@@ -2,10 +2,10 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/runtime.py` (`Studio`), `backend/app/pipeline/runner.py` (`PipelineRunner.collect`, `_process_job*`, `_extract_page`, `_expand`, `_heal`, `_finish_dataset`), `backend/app/db/sqlite_store.py` (`runs`, `jobs`, `events`, `llm_calls`) |
+| **Код** | `backend/app/runtime.py` (`Studio`), `backend/app/pipeline/runner.py` (`PipelineRunner.collect`, `_process_job*`, `_process_api_list`, `_process_api_detail`, `_extract_page`, `_expand`, `_heal`, `_finish_dataset`), `backend/app/db/sqlite_store.py` (`runs`, `jobs`, `events`, `llm_calls`, `api_state`) |
 | **API** | `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/cancel`, `GET /api/tasks/{id}/events[?after]`, `GET /api/tasks/{id}/events/stream` |
 | **CLI** | `daas collect <id> [--pages N] [--ack-high-risk --reason]` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py` |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py` |
 | **Джерела** | ADR-02, `docs/03` §2 |
 | **Статус** | as-built v0.1 |
 
@@ -124,6 +124,23 @@ URL з обліковими даними.
 `/changes` повертає лише події типів `new_entity, removed_entity, field_changed, price_drop`.
 - **Перевірка:** `tests/test_storage.py::test_events_and_llm_ledger` (`after_id`),
   `tests/test_api_flow.py::test_full_pipeline` (`/changes`); SSE — прогалина
+
+### REQ-RUN-029 — Інкрементальна пагінація та деталізація API-записів
+Для задач з `ApiSourceSpec` runner **ПОВИНЕН**:
+- ставити `api_list` у чергу (в інкрементальному режимі — зі збереженого `api_state`, якщо є) і
+  переходити по наступних сторінках у межах `limits.max_pages` без зациклення;
+- завантажувати `api_detail` за `detail_url_template` через ту саму чергу з `PolicyGuardFetcher` і
+  пропускати tombstones в інкрементальному режимі (`incremental=True`);
+- зберігати курсор у `api_state` (`api_cursor_saved`) **лише** після успішного завершення прогону
+  без помилкових або пропущених задач.
+- **Перевірка:** `tests/test_open_api_source.py::test_api_collection_pagination_cursor_and_failure_safety`,
+  `tests/test_open_api_source.py::test_sqlite_migration_v4_opens_v3_database`
+
+### REQ-RUN-030 — Запуск збору API-задачі без CSS-калібрування
+Для задачі з `spec.api_source is not None` `POST /api/tasks/{id}/run` і `Studio.collect` **ПОВИННІ**
+дозволяти запуск збору зі статусу `draft` без попереднього калібрування і без `skip_calibration=true`,
+не порушуючи правило 409 для звичайних HTML-задач.
+- **Перевірка:** `tests/test_open_api_source.py::test_api_collection_pagination_cursor_and_failure_safety`
 
 ## 5. Спостережувана поведінка / відкриті питання
 - Після вичерпання `DAAS_MAX_LLM_CALLS_PER_RUN` подія `llm_limit` пишеться на **кожній** ітерації
