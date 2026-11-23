@@ -4,9 +4,9 @@
 |:---|:---|
 | **Код** | `backend/app/llm/router.py` (`LLMRouter`), `backend/app/llm/providers.py` (`OpenAICompatProvider`, `MockProvider`, `build_providers`, `PRICING`, `estimate_cost`), `backend/app/llm/base.py` (`LLMRequest`, `LLMResponse`, `LLMBudget`), `backend/app/llm/guard.py`, `backend/app/llm/parsing.py`, `backend/app/llm/prompts.py` |
 | **Налаштування** | `DAAS_LLM_PROVIDER`, `DAAS_LLM_LOCAL_BASE_URL/MODEL`, `DAAS_LLM_BASE_URL/API_KEY/MODEL`, `DAAS_LLM_FALLBACK_*`, `DAAS_LLM_BUDGET_USD`, `DAAS_LLM_CACHE`, `DAAS_LLM_REDACT_PII`, `DAAS_MAX_LLM_CALLS_PER_RUN` |
-| **Тести** | `tests/test_llm.py` |
+| **Тести** | `tests/test_llm.py`, `tests/test_metrics_and_spend.py` |
 | **Джерела** | ADR-04, ADR-06, `docs/02` §3 |
-| **Статус** | as-built v0.1 |
+| **Статус** | as-built (P1-09) |
 
 ## 1. Призначення
 Один протокол (OpenAI-сумісний) для локальних (Ollama, LM Studio, vLLM) і хмарних моделей; LLM —
@@ -52,10 +52,13 @@ error="no_llm_provider_configured")`.
 `cached=true` без виклику провайдера. Невдалі відповіді не кешуються.
 - **Перевірка:** `tests/test_llm.py::test_router_caches_successful_responses`
 
-### REQ-LLM-007 — Ledger витрат
+### REQ-LLM-007 — Ledger витрат без гонок стану на спільному маршрутизаторі
 Кожен некешований виклик **ПОВИНЕН** записуватися в `llm_calls` (purpose, provider, model, tokens,
-usd, task_id, run_id); `run_spend`/`task_spend` агрегують.
-- **Перевірка:** `tests/test_storage.py::test_events_and_llm_ledger`
+usd, task_id, run_id); `run_spend`/`task_spend` агрегують. `task_id` і `run_id` визначаються з
+пріоритетом «контекст запиту (`LLMRequest.task_id/run_id`) → активний `run_scope` корутини → стан
+`bind`», що виключає перехресну атрибуцію витрат при паралельних запусках та плануванні.
+- **Перевірка:** `tests/test_storage.py::test_events_and_llm_ledger`,
+  `tests/test_metrics_and_spend.py::test_router_attribution_isolated_across_concurrent_scopes`
 
 ### REQ-LLM-008 — Недовірений вміст і injection
 Вміст сторінки **ПОВИНЕН** передаватися лише в `user`-повідомленні всередині
@@ -83,7 +86,4 @@ tools. `detect_injection` повідомляє маркери (`ignore_instructi
 - **Перевірка:** архітектурна вимога; перевіряється рев'ю (у коді немає `eval/exec`)
 
 ## 3. Відкриті питання
-- `router.bind(task_id, run_id)` змінює стан **спільного** роутера; при паралельних запусках різних
-  задач записи ledger можуть атрибутуватися не тому запуску. Перенести `task_id/run_id` у
-  `LLMRequest` або в `run_scope`?
-- Витрати планування мають `task_id=None` (P1-09).
+- (немає — питання спільної прив'язки `router.bind()` і атрибуції витрат планування закриті в `P1-09`)

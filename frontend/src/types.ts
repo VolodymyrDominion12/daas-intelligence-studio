@@ -221,6 +221,24 @@ export interface TaskDetail {
   dataset: DatasetPayload
   runs: RunInfo[]
   active_run: RunInfo | null
+  quarantine_count?: number
+  spend_usd?: number
+}
+
+export interface QuarantineItem {
+  id: string
+  run_id: string | null
+  source_url: string
+  reason: string
+  payload: Record<string, unknown>
+  created_at: string | null
+}
+
+export interface QuarantineResponse {
+  items: QuarantineItem[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface ProvenanceInfo {

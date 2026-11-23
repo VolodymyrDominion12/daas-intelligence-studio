@@ -122,6 +122,8 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `limit_reached`, `llm_limit` | warning | runner | Ліміт сторінок / LLM-викликів |
 | `selector_healed` | info | runner | Схему перегенеровано після промаху |
 | `records_removed`, `tombstones_skipped`, `tombstones_suspicious` | info/debug/warning | runner | Tombstones (див. 08) |
+| `record_quarantined` | warning | `pipeline/runner.py` | Підозрілий запис спрямовано в карантин (`data.reason`, `data.url`) |
+| `quarantine_approved`, `quarantine_dismissed` | info | `runtime.Studio` | Підтвердження запису в датасет або відхилення з карантину (`data.item_id`) |
 | `changes_detected`, `new_entity`, `removed_entity`, `field_changed`, `price_drop` | info/warning | runner | Зміни між версіями |
 | `quality_warning` | warning | `pipeline/runner.py` | Падіння кількості рядків або порожнє обов'язкове поле після прогону |
 | `eval_completed` | info/warning | `runtime.Studio` | Підсумок офлайн gold-set eval (P/R/F1 без сирих PII-значень) |

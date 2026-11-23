@@ -14,6 +14,7 @@ class ExtractionOutcome:
     warnings: list[str] = field(default_factory=list)
     llm_cost_usd: float = 0.0
     llm_calls: int = 0
+    quarantined: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

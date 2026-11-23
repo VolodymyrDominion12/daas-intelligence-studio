@@ -224,7 +224,7 @@ def source_note(store: OperationalStore, urls: Iterable[str]) -> str:
 
 @dataclass(slots=True)
 class RunScope:
-    task_id: str
+    task_id: str | None = None
     run_id: str | None = None
     acknowledged: frozenset[str] = frozenset()
     reported: set[str] = field(default_factory=set)
@@ -242,7 +242,7 @@ def current_scope() -> RunScope | None:
 
 @contextlib.contextmanager
 def run_scope(
-    task_id: str, run_id: str | None = None, acknowledged: Iterable[str] = ()
+    task_id: str | None = None, run_id: str | None = None, acknowledged: Iterable[str] = ()
 ) -> Iterator[RunScope]:
     scope = RunScope(task_id=task_id, run_id=run_id, acknowledged=frozenset(acknowledged))
     token = _SCOPE.set(scope)
@@ -325,7 +325,7 @@ class PolicyGuardFetcher:
             return  # one event per domain and rule per run, not one per link
         try:
             self.store.add_event(
-                scope.task_id,
+                scope.task_id or "system",
                 "compliance_blocked",
                 f"Заблоковано політикою джерел: {safe_url}",
                 run_id=scope.run_id,

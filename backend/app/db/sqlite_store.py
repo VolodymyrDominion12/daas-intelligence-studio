@@ -720,6 +720,16 @@ class OperationalStore:
                 "UPDATE datasets SET updated_at = ? WHERE id = ?", (iso(), dataset_id)
             )
 
+    def update_version_row_count(self, dataset_id: str, version: int, row_count: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE dataset_versions SET row_count = ? WHERE dataset_id = ? AND version = ?",
+                (row_count, dataset_id, version),
+            )
+            self._conn.execute(
+                "UPDATE datasets SET updated_at = ? WHERE id = ?", (iso(), dataset_id)
+            )
+
     def run_has_version(self, run_id: str) -> bool:
         return self._one("SELECT 1 FROM dataset_versions WHERE run_id = ? LIMIT 1", (run_id,)) is not None
 
@@ -888,6 +898,14 @@ class OperationalStore:
     def task_spend(self, task_id: str) -> float:
         row = self._one("SELECT COALESCE(SUM(usd), 0) AS s FROM llm_calls WHERE task_id = ?", (task_id,))
         return float(row["s"]) if row else 0.0
+
+    def bind_llm_calls(self, run_id: str, task_id: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE llm_calls SET task_id = ? WHERE run_id = ? AND task_id IS NULL",
+                (task_id, run_id),
+            )
+        return cur.rowcount
 
     # -- source registry --------------------------------------------------
     def get_source_policy(self, domain: str) -> SourcePolicy | None:
@@ -1220,6 +1238,82 @@ class OperationalStore:
             "queued_jobs": queued["c"] if queued else 0,
             "failed_jobs": failed["c"] if failed else 0,
             "llm_spend_usd": round(float(spend["s"]), 4) if spend else 0.0,
+        }
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        tasks_by_status = {"draft": 0, "ready": 0, "running": 0, "done": 0, "failed": 0}
+        runs_by_status = {
+            "queued": 0,
+            "running": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "partial": 0,
+            "cancelled": 0,
+        }
+        jobs_by_status = {
+            "queued": 0,
+            "leased": 0,
+            "done": 0,
+            "failed": 0,
+            "skipped": 0,
+            "cancelled": 0,
+        }
+        pages_fetched = 0
+        pages_cached = 0
+        pages_failed = 0
+        robots_blocked = 0
+        llm_by_purpose: dict[str, dict[str, Any]] = {}
+        llm_spend_usd_total = 0.0
+        llm_calls_total = 0
+
+        with self._lock:
+            for row in self._conn.execute("SELECT status, COUNT(*) AS c FROM tasks GROUP BY status"):
+                tasks_by_status[str(row["status"])] = int(row["c"])
+            for row in self._conn.execute("SELECT status, COUNT(*) AS c FROM runs GROUP BY status"):
+                runs_by_status[str(row["status"])] = int(row["c"])
+            for row in self._conn.execute("SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"):
+                jobs_by_status[str(row["status"])] = int(row["c"])
+            for row in self._conn.execute("SELECT stats_json FROM runs"):
+                stats = json_loads(row["stats_json"], {})
+                if isinstance(stats, dict):
+                    pages_fetched += int(stats.get("pages_fetched") or 0)
+                    pages_cached += int(stats.get("pages_cached") or 0)
+                    pages_failed += int(stats.get("pages_failed") or 0)
+                    robots_blocked += int(stats.get("robots_blocked") or 0)
+            comp_row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE type = 'compliance_blocked'"
+            ).fetchone()
+            compliance_blocked = int(comp_row["c"]) if comp_row else 0
+            for row in self._conn.execute(
+                "SELECT purpose, COUNT(*) AS calls, COALESCE(SUM(usd), 0) AS usd,"
+                " COALESCE(SUM(tokens_in), 0) AS tokens_in,"
+                " COALESCE(SUM(tokens_out), 0) AS tokens_out"
+                " FROM llm_calls GROUP BY purpose"
+            ):
+                purpose = str(row["purpose"])
+                calls = int(row["calls"])
+                usd = float(row["usd"])
+                llm_by_purpose[purpose] = {
+                    "calls": calls,
+                    "usd": usd,
+                    "tokens_in": int(row["tokens_in"]),
+                    "tokens_out": int(row["tokens_out"]),
+                }
+                llm_calls_total += calls
+                llm_spend_usd_total += usd
+
+        return {
+            "tasks_by_status": tasks_by_status,
+            "runs_by_status": runs_by_status,
+            "jobs_by_status": jobs_by_status,
+            "pages_fetched": pages_fetched,
+            "pages_cached": pages_cached,
+            "pages_failed": pages_failed,
+            "robots_blocked": robots_blocked,
+            "compliance_blocked": compliance_blocked,
+            "llm_spend_usd_total": round(llm_spend_usd_total, 6),
+            "llm_calls_total": llm_calls_total,
+            "llm_by_purpose": llm_by_purpose,
         }
 
     def dataset_manifest(self, dataset_id: str) -> dict[str, Any]:

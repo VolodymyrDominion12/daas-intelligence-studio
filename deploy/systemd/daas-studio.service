@@ -1,0 +1,23 @@
+[Unit]
+Description=DaaS Intelligence Studio (API + UI + Scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=daas
+Group=daas
+WorkingDirectory=/opt/daas-intelligence-studio/backend
+EnvironmentFile=/opt/daas-intelligence-studio/.env
+ExecStart=/opt/daas-intelligence-studio/backend/.venv/bin/daas serve --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Захист файлової системи
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

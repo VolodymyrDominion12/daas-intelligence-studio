@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import uuid
 from typing import Any
 
 from . import __version__
@@ -28,6 +29,8 @@ from .models import (
     DeliveryChannel,
     DeliveryFilters,
     EvalReport,
+    ExtractedRecord,
+    Provenance,
     RunInfo,
     ScheduleInfo,
     SubscriptionInfo,
@@ -42,7 +45,15 @@ from .pipeline.runner import PipelineRunner
 from .pipeline.scheduler import TaskScheduler, next_cron_after, validate_cron
 from .scraping.fetcher import build_fetcher
 from .storage.raw_cache import RawCache
-from .utils import assert_public_url, iso, utcnow
+from .utils import (
+    assert_public_url,
+    coerce_value,
+    hash_text,
+    iso,
+    json_dumps,
+    record_key_for,
+    utcnow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +165,14 @@ class Studio:
         for seed in seeds:
             if seed and seed.strip():
                 assert_logged_out(seed.strip())
-        if api_source is not None:
-            spec = await self.planner.plan(prompt, seeds, title=title, api_source=api_source)
-        else:
-            spec = await self.planner.plan(prompt, seeds, title=title)
+        plan_ref = f"plan:{uuid.uuid4().hex[:12]}"
+        with run_scope(None, plan_ref):
+            if api_source is not None:
+                spec = await self.planner.plan(
+                    prompt, seeds, title=title, api_source=api_source
+                )
+            else:
+                spec = await self.planner.plan(prompt, seeds, title=title)
         # Seeds discovered by search are validated too, before anything is persisted.
         dropped = [seed for seed in spec.seeds if login_violation(seed)]
         if dropped:
@@ -166,6 +181,8 @@ class Studio:
                 f"Відкинуто {len(dropped)} знайдених URL з токенами доступу (лише публічні сторінки)."
             )
         task = self.store.create_task(spec)
+        self.store.bind_llm_calls(plan_ref, task.id)
+        plan_usd = round(self.store.run_spend(plan_ref), 6)
         self.store.add_event(
             task.id,
             "task_created",
@@ -174,6 +191,7 @@ class Studio:
                 "columns": [column.key for column in spec.columns],
                 "llm": self.router.available,
                 "api_source": spec.api_source is not None,
+                "plan_llm_usd": plan_usd,
             },
         )
         self.store.add_event(
@@ -537,6 +555,114 @@ class Studio:
         return report
 
     # ------------------------------------------------------------------
+    # quarantine management (P1-08)
+    # ------------------------------------------------------------------
+    def list_quarantine(
+        self, task_id: str, *, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        task = self._task(task_id)
+        dataset_id = task.dataset_id or task.id
+        return self.analytics.list_quarantine(dataset_id, limit=limit, offset=offset)
+
+    def approve_quarantine(self, task_id: str, item_id: str) -> dict[str, Any]:
+        task = self._task(task_id)
+        dataset_id = task.dataset_id or task.id
+        item = self.analytics.get_quarantine_item(dataset_id, item_id)
+        if item is None:
+            raise KeyError(f"Запис у карантині не знайдено: {item_id}")
+
+        raw_payload = dict(item.get("payload") or {})
+        col_map = task.spec.column_map
+        payload: dict[str, Any] = {}
+        provenance: dict[str, Provenance] = {}
+        now = utcnow()
+        source_url = str(item.get("source_url") or "")
+        reason = str(item.get("reason") or "")
+
+        for key, value in raw_payload.items():
+            if value in (None, "", []):
+                continue
+            col = col_map.get(key)
+            if col is not None:
+                coerced = coerce_value(value, col.dtype)
+                payload[key] = coerced if coerced not in (None, "", []) else value
+            else:
+                payload[key] = value
+            provenance[key] = Provenance(
+                method="manual",
+                confidence=0.8,
+                source_url=source_url or None,
+                observed_at=now,
+                verified=True,
+                note=f"Підтверджено з карантину: {reason[:160]}" if reason else "Підтверджено з карантину",
+            )
+
+        if not payload:
+            raise ValueError("Неможливо підтвердити порожній запис із карантину")
+
+        record_key = record_key_for(payload, fallback=source_url or item_id)
+        record = ExtractedRecord(
+            record_key=record_key,
+            payload=payload,
+            provenance=provenance,
+            source_url=source_url,
+            content_hash=hash_text(json_dumps(payload)),
+        )
+
+        dataset = self.store.dataset(dataset_id)
+        version = dataset.version if dataset and dataset.version > 0 else 1
+        self.analytics.append_records(dataset_id, version, item.get("run_id"), [record])
+        self.analytics.delete_quarantine_item(dataset_id, item_id)
+
+        row_count = self.analytics.count_records(dataset_id)
+        if dataset is None or dataset.version == 0:
+            self.store.add_dataset_version(
+                dataset_id,
+                1,
+                item.get("run_id"),
+                row_count,
+                {
+                    "task_id": task_id,
+                    "dataset_version": 1,
+                    "rows": row_count,
+                    "approved_from_quarantine": True,
+                },
+            )
+        else:
+            self.store.update_version_row_count(dataset_id, version, row_count)
+
+        if task.status in {"draft", "failed", "ready"} and row_count > 0:
+            self.store.update_task(task_id, status="done")
+
+        self.store.add_event(
+            task_id,
+            "quarantine_approved",
+            f"Запис підтверджено з карантину ({record_key})",
+            run_id=item.get("run_id"),
+            level="info",
+            data={"item_id": item_id, "record_key": record_key, "version": version},
+        )
+        saved = self.analytics.get_record(dataset_id, record_key)
+        return {"record": saved, "row_count": row_count}
+
+    def dismiss_quarantine(self, task_id: str, item_id: str) -> bool:
+        task = self._task(task_id)
+        dataset_id = task.dataset_id or task.id
+        item = self.analytics.get_quarantine_item(dataset_id, item_id)
+        if item is None:
+            raise KeyError(f"Запис у карантині не знайдено: {item_id}")
+        self.analytics.delete_quarantine_item(dataset_id, item_id)
+        self.store.add_event(
+            task_id,
+            "quarantine_dismissed",
+            f"Запис відхилено з карантину ({item_id})",
+            run_id=item.get("run_id"),
+            level="info",
+            data={"item_id": item_id, "reason": item.get("reason", "")},
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # info
     # ------------------------------------------------------------------
     def capabilities(self) -> dict[str, Any]:
@@ -564,6 +690,108 @@ class Studio:
         data = self.store.overview()
         data["cache"] = self.cache.stats()
         return data
+
+    def prometheus_metrics(self) -> str:
+        try:
+            analytics_ok = bool(self.analytics.ping())
+        except Exception:  # noqa: BLE001
+            analytics_ok = False
+
+        op = self.store.metrics_snapshot()
+        if analytics_ok:
+            try:
+                an = self.analytics.metrics_snapshot()
+            except Exception:  # noqa: BLE001
+                analytics_ok = False
+                an = {"records_current": 0, "records_quarantined": 0}
+        else:
+            an = {"records_current": 0, "records_quarantined": 0}
+
+        cache_pages = int(self.cache.stats().get("pages") or 0)
+
+        def esc(value: str) -> str:
+            return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        def fmt_usd(value: float) -> str:
+            text = f"{round(value, 6):.6f}".rstrip("0").rstrip(".")
+            return text or "0"
+
+        lines: list[str] = [
+            "# HELP daas_up Whether the analytical store is reachable (1=up, 0=down).",
+            "# TYPE daas_up gauge",
+            f"daas_up {1 if analytics_ok else 0}",
+            "# HELP daas_tasks_total Number of tasks by status.",
+            "# TYPE daas_tasks_total gauge",
+        ]
+        for status, count in op["tasks_by_status"].items():
+            lines.append(f'daas_tasks_total{{status="{esc(status)}"}} {int(count)}')
+
+        lines.extend([
+            "# HELP daas_runs_total Number of runs by status.",
+            "# TYPE daas_runs_total counter",
+        ])
+        for status, count in op["runs_by_status"].items():
+            lines.append(f'daas_runs_total{{status="{esc(status)}"}} {int(count)}')
+
+        lines.extend([
+            "# HELP daas_queue_jobs Number of queue jobs by status.",
+            "# TYPE daas_queue_jobs gauge",
+        ])
+        for status, count in op["jobs_by_status"].items():
+            lines.append(f'daas_queue_jobs{{status="{esc(status)}"}} {int(count)}')
+
+        lines.extend([
+            "# HELP daas_pages_fetched_total Total pages fetched from network.",
+            "# TYPE daas_pages_fetched_total counter",
+            f"daas_pages_fetched_total {int(op['pages_fetched'])}",
+            "# HELP daas_pages_cached_total Total pages served from local cache.",
+            "# TYPE daas_pages_cached_total counter",
+            f"daas_pages_cached_total {int(op['pages_cached'])}",
+            "# HELP daas_pages_failed_total Total page fetch failures.",
+            "# TYPE daas_pages_failed_total counter",
+            f"daas_pages_failed_total {int(op['pages_failed'])}",
+            "# HELP daas_blocked_total Total blocked fetches or runs by reason.",
+            "# TYPE daas_blocked_total counter",
+            f'daas_blocked_total{{reason="robots"}} {int(op["robots_blocked"])}',
+            f'daas_blocked_total{{reason="compliance"}} {int(op["compliance_blocked"])}',
+            "# HELP daas_records_current Current active records in analytical store.",
+            "# TYPE daas_records_current gauge",
+            f"daas_records_current {int(an['records_current'])}",
+            "# HELP daas_records_quarantined Records awaiting review in quarantine.",
+            "# TYPE daas_records_quarantined gauge",
+            f"daas_records_quarantined {int(an['records_quarantined'])}",
+            "# HELP daas_llm_spend_usd_total Total non-cached LLM spend in USD.",
+            "# TYPE daas_llm_spend_usd_total counter",
+            f"daas_llm_spend_usd_total {fmt_usd(op['llm_spend_usd_total'])}",
+            "# HELP daas_llm_calls_total Total non-cached LLM calls.",
+            "# TYPE daas_llm_calls_total counter",
+            f"daas_llm_calls_total {int(op['llm_calls_total'])}",
+        ])
+
+        if op["llm_by_purpose"]:
+            lines.extend([
+                "# HELP daas_llm_spend_usd_by_purpose LLM spend in USD broken down by purpose.",
+                "# TYPE daas_llm_spend_usd_by_purpose counter",
+            ])
+            for purpose, stats in sorted(op["llm_by_purpose"].items()):
+                lines.append(
+                    f'daas_llm_spend_usd_by_purpose{{purpose="{esc(purpose)}"}} {fmt_usd(stats["usd"])}'
+                )
+            lines.extend([
+                "# HELP daas_llm_calls_by_purpose_total LLM calls broken down by purpose.",
+                "# TYPE daas_llm_calls_by_purpose_total counter",
+            ])
+            for purpose, stats in sorted(op["llm_by_purpose"].items()):
+                lines.append(
+                    f'daas_llm_calls_by_purpose_total{{purpose="{esc(purpose)}"}} {int(stats["calls"])}'
+                )
+
+        lines.extend([
+            "# HELP daas_raw_cache_pages Number of HTML/JSON pages in raw cache.",
+            "# TYPE daas_raw_cache_pages gauge",
+            f"daas_raw_cache_pages {cache_pages}",
+        ])
+        return "\n".join(lines) + "\n"
 
     # ------------------------------------------------------------------
     # internals

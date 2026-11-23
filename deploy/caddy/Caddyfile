@@ -1,0 +1,13 @@
+# Шаблон Caddy для HTTPS-проксі на 1 VPS.
+# Замініть studio.example.com на ваш домен та додайте в .env:
+#   DAAS_CORS_ORIGINS=https://studio.example.com
+# (без цього DNS-rebinding guard заблокує запити з невідомим заголовком Host — 403).
+
+studio.example.com {
+	encode gzip
+
+	# Довгі SSE-потоки журналу (/api/tasks/*/events/stream)
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
+}

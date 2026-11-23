@@ -50,6 +50,7 @@ class Planner:
         title: str | None = None,
         budget: LLMBudget | None = None,
         allow_discovery: bool = True,
+        task_id: str | None = None,
         run_id: str | None = None,
         api_source: ApiSourceSpec | None = None,
     ) -> TaskSpec:
@@ -64,8 +65,14 @@ class Planner:
         )
         llm_spec: TaskSpec | None = None
         if spec.api_source is None and self.router.available:
-            self.router.bind(task_id=None, run_id=run_id, budget_usd=self.settings.llm_budget_usd)
-            llm_spec = await self._plan_with_llm(prompt, seeds, budget=budget)
+            plan_budget = budget or LLMBudget(self.settings.llm_budget_usd)
+            llm_spec = await self._plan_with_llm(
+                prompt,
+                seeds,
+                budget=plan_budget,
+                task_id=task_id,
+                run_id=run_id,
+            )
         if llm_spec is not None:
             spec = self._merge(spec, llm_spec)
 
@@ -95,7 +102,13 @@ class Planner:
 
     # -- llm --------------------------------------------------------------
     async def _plan_with_llm(
-        self, prompt: str, seeds: list[str], *, budget: LLMBudget | None
+        self,
+        prompt: str,
+        seeds: list[str],
+        *,
+        budget: LLMBudget | None,
+        task_id: str | None = None,
+        run_id: str | None = None,
     ) -> TaskSpec | None:
         request = LLMRequest(
             purpose="plan",
@@ -104,6 +117,8 @@ class Planner:
             schema={"type": "object", "properties": {"columns": {"type": "array"}}},
             max_tokens=2200,
             prefer="quality",
+            task_id=task_id,
+            run_id=run_id,
         )
         response = await self.router.complete_json(request, budget=budget)
         if not response.ok or not isinstance(response.data, dict):

@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/extraction/engine.py`, `backend/app/extraction/jsonld.py`, `backend/app/extraction/css.py`, `backend/app/extraction/api_json.py`, `backend/app/extraction/llm_extractor.py`, `backend/app/extraction/base.py`, `backend/app/extraction/learner.py` (`fill_from_text`, `coerce_any`), `backend/app/scraping/page.py` (`extract_json_ld`) |
-| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py`, `tests/test_open_api_source.py` |
+| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py`, `tests/test_open_api_source.py`, `tests/test_quarantine.py` |
 | **Джерела** | ADR-06, `docs/02` §3 |
-| **Статус** | as-built v0.1 |
+| **Статус** | as-built (P1-08) |
 
 ## 1. Призначення
 Один рушій для калібрування і масового збору: детерміновані стратегії (JSON-LD, CSS) спершу, LLM —
@@ -54,11 +54,13 @@
 з першого рядка тексту, якщо такі колонки є в spec. AI-колонки не дозаповнюються.
 - **Перевірка:** `tests/test_learner.py::test_learns_detail_page_schema_using_labels` (частково)
 
-### REQ-EXT-006 — Фільтр придатності запису
-Запис **ПОВИНЕН** відкидатися, якщо після очищення має < 2 непорожніх значень або жодного
-ідентифікуючого поля (`name, title, company, website, phone, email, address`). Значення, що не
-приводяться до `dtype` колонки, видаляються.
-- **Перевірка:** — (прогалина)
+### REQ-EXT-006 — Фільтр придатності запису і маршрутизація відхилених у карантин
+Значення, що не приводяться до `dtype` колонки, **ПОВИННІ** видалятися **до** підрахунку
+непорожніх полів, а не-схемні ключі елемента — відфільтровуватися. Запис відхиляється (і
+повертається в `outcome.quarantined` з причиною, якщо мав ≥ 1 витягнутого поля), коли після
+очищення має `< 2` валідних полів (за наявності ≥ 2 джерельних колонок) або жодного ідентифікуючого
+поля (`name, title, company, website, phone, email, address`).
+- **Перевірка:** `tests/test_quarantine.py::test_extraction_usability_counts_after_coercion_and_flags_quarantine`
 
 ### REQ-EXT-007 — Ключ і походження запису
 `to_records` **ПОВИНЕН** відкидати порожні значення, рахувати ключ через `record_key_for`
@@ -88,11 +90,7 @@ LLM-екстрактор **ПОВИНЕН**: передавати сторінк
 - **Перевірка:** `tests/test_open_api_source.py::test_json_extractor_maps_fields_and_handles_broken_json`
 
 ## 4. Спостережувана поведінка / відкриті питання
-- `_is_usable` видаляє непридатні значення з `item`, але рахує мінімум «≥ 2» по копії **до**
-  видалення — запис з одним валідним полем і одним непридатним може пройти. Підтвердити, що це
-  баг, і виправити разом із тестом REQ-EXT-006.
-- Ключі елемента, яких немає в колонках spec, не потрапляють у підрахунок, але лишаються в
-  `item` і можуть потрапити в payload. Чи це бажано?
+- (немає)
 
 ## 5. Прогалини
-REQ-EXT-006, REQ-EXT-008 (екстрактор із mock-LLM) — без тестів.
+REQ-EXT-008 (екстрактор із mock-LLM) — без тестів.

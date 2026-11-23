@@ -98,37 +98,59 @@ def extract_json_records(
     source_url: str,
 ) -> tuple[list[ExtractedRecord], list[str]]:
     """Map JSON list or detail response into validated ``ExtractedRecord`` items."""
+    records, _quarantined, warnings = extract_json_records_with_quarantine(
+        raw_json, spec, source_url, strict_quarantine=False
+    )
+    return records, warnings
+
+
+def extract_json_records_with_quarantine(
+    raw_json: str,
+    spec: TaskSpec,
+    source_url: str,
+    *,
+    strict_quarantine: bool = True,
+) -> tuple[list[ExtractedRecord], list[dict[str, Any]], list[str]]:
+    """Map JSON items into validated ``ExtractedRecord`` items and quarantined suspects."""
     api_source = spec.api_source
     if api_source is None:
-        return [], ["У задачі відсутня конфігурація api_source"]
+        return [], [], ["У задачі відсутня конфігурація api_source"]
 
     try:
         doc = json.loads(raw_json)
     except (json.JSONDecodeError, TypeError) as exc:
-        return [], [f"Невалідний JSON у відповіді API: {exc}"]
+        return [], [], [f"Невалідний JSON у відповіді API: {exc}"]
 
     container = _walk_path(doc, api_source.items_path) if api_source.items_path else doc
     if container is None:
-        return [], []
+        return [], [], []
     items = container if isinstance(container, list) else [container]
 
     now = utcnow()
     col_map = spec.column_map
+    min_fields = 1 if len(spec.source_columns()) <= 1 else 2
     records: list[ExtractedRecord] = []
+    quarantined: list[dict[str, Any]] = []
 
     for item in items:
         if not isinstance(item, dict):
             continue
         payload: dict[str, Any] = {}
+        raw_payload: dict[str, Any] = {}
         provenance: dict[str, Provenance] = {}
+        coercion_errors: list[str] = []
 
         for col_key, json_path in api_source.field_map.items():
             col = col_map.get(col_key)
             if col is None or col.is_ai:
                 continue
             raw_val = _walk_path(item, json_path)
+            if raw_val not in (None, "", []):
+                raw_payload[col_key] = raw_val
             coerced = coerce_value(raw_val, col.dtype)
             if coerced is None or coerced == "" or coerced == []:
+                if raw_val not in (None, "", []):
+                    coercion_errors.append(f"{col.title} ({col.key}: очікувався тип {col.dtype})")
                 continue
             payload[col_key] = coerced
             provenance[col_key] = Provenance(
@@ -148,7 +170,9 @@ def extract_json_records(
             and "url" in col_map
             and "url" not in payload
         ):
-            payload["url"] = _render_template(api_source.record_url_template, item_id)
+            rendered_url = _render_template(api_source.record_url_template, item_id)
+            payload["url"] = rendered_url
+            raw_payload.setdefault("url", rendered_url)
             provenance["url"] = Provenance(
                 method="api_json",
                 confidence=0.98,
@@ -156,6 +180,27 @@ def extract_json_records(
                 observed_at=now,
                 verified=True,
             )
+
+        if not payload and not raw_payload:
+            continue
+
+        if strict_quarantine:
+            if coercion_errors:
+                quarantined.append(
+                    {
+                        "payload": raw_payload or payload,
+                        "reason": "Невалідне значення типу: " + "; ".join(coercion_errors),
+                    }
+                )
+                continue
+            if len(payload) < min_fields:
+                quarantined.append(
+                    {
+                        "payload": raw_payload or payload,
+                        "reason": f"Менше {min_fields} заповнених полів у записі API ({len(payload)})",
+                    }
+                )
+                continue
 
         if not payload:
             continue
@@ -171,4 +216,4 @@ def extract_json_records(
             )
         )
 
-    return records, []
+    return records, quarantined, []

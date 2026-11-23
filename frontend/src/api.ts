@@ -13,7 +13,9 @@ import type {
   FieldSpec,
   GoldCaseInput,
   Limits,
+  QuarantineResponse,
   RecordDetail,
+  RecordRow,
   RecordsResponse,
   RunInfo,
   ScheduleInfo,
@@ -230,6 +232,18 @@ export const api = {
     request<RecordDetail>(`/tasks/${id}/records/${encodeURIComponent(recordKey)}`),
   duplicates: (id: string, threshold = 88) =>
     request<DuplicatesResponse>(`/tasks/${id}/duplicates?threshold=${threshold}`),
+  quarantine: (id: string, limit = 50, offset = 0) =>
+    request<QuarantineResponse>(`/tasks/${id}/quarantine?limit=${limit}&offset=${offset}`),
+  approveQuarantine: (id: string, itemId: string) =>
+    request<{ record: RecordRow | null; row_count: number }>(
+      `/tasks/${id}/quarantine/${encodeURIComponent(itemId)}/approve`,
+      { method: 'POST' },
+    ),
+  dismissQuarantine: (id: string, itemId: string) =>
+    request<{ deleted: boolean }>(
+      `/tasks/${id}/quarantine/${encodeURIComponent(itemId)}`,
+      { method: 'DELETE' },
+    ),
   export: (id: string, payload: { format: string; mask_pii: boolean; limit?: number | null }) =>
     request<ExportResult>(`/tasks/${id}/exports`, {
       method: 'POST',

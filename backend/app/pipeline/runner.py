@@ -16,7 +16,7 @@ from ..db.duckdb_store import AnalyticsStore, dataset_slug, detect_price_fields
 from ..db.sqlite_store import OperationalStore
 from ..enrichment.ai_column import AiColumns
 from ..enrichment.base import EnrichmentContext, merge_payload, provenance_for
-from ..extraction.api_json import extract_json_list_targets, extract_json_records
+from ..extraction.api_json import extract_json_list_targets, extract_json_records_with_quarantine
 from ..extraction.engine import ExtractionEngine
 from ..extraction.learner import learn_schema, schema_signature
 from ..llm.base import LLMBudget
@@ -368,6 +368,26 @@ class PipelineRunner:
             run_id=ctx.run_id, level=level, data={"kind": result.kind, "status": status},
         )
 
+    def _quarantine_items(
+        self, items: list[dict], source_url: str, ctx: RunContext
+    ) -> None:
+        for item in items:
+            reason = str(item.get("reason") or "Запис відхилено валідацією")
+            payload = dict(item.get("payload") or {})
+            self.analytics.quarantine(
+                ctx.dataset_id, ctx.run_id, source_url, reason, payload
+            )
+            ctx.stats.records_quarantined += 1
+            if ctx.stats.records_quarantined <= 25:
+                self.store.add_event(
+                    ctx.task.id,
+                    "record_quarantined",
+                    f"Карантин ← {source_url}: {reason}",
+                    run_id=ctx.run_id,
+                    level="warning",
+                    data={"url": source_url, "reason": reason},
+                )
+
     def _persist_records(
         self,
         records: list[ExtractedRecord],
@@ -379,16 +399,28 @@ class PipelineRunner:
         confidence: float = 1.0,
         llm_cost_usd: float = 0.0,
     ) -> None:
-        if not page.from_cache:
-            # Fresh page that yielded records: it really was checked in this run. Pages that
-            # yield nothing (broken layout?) or come from cache never count as evidence.
-            ctx.checked_sources.update({page.url, page.final_url or page.url, job["url"]})
+        persisted = 0
+        source_url = page.final_url or page.url
         for record in records:
+            mean_conf = record.mean_confidence()
+            if record.provenance and mean_conf < 0.40:
+                self._quarantine_items(
+                    [
+                        {
+                            "payload": record.payload,
+                            "reason": f"Низька впевненість екстракції ({mean_conf:.2f} < 0.40)",
+                        }
+                    ],
+                    source_url,
+                    ctx,
+                )
+                continue
             ctx.seen_keys.add(record.record_key)
             record = self._merge_with_existing(record, ctx)
             self.analytics.append_records(
                 ctx.dataset_id, ctx.version, ctx.run_id, [record]
             )
+            persisted += 1
             if record.record_key in ctx.known_keys:
                 ctx.stats.records_updated += 1
             else:
@@ -402,17 +434,21 @@ class PipelineRunner:
                 },
             }
 
-        self.store.add_event(
-            ctx.task.id, "page_extracted",
-            f"{len(records)} записів ← {page.final_url or page.url} [{strategy}]",
-            run_id=ctx.run_id, level="debug",
-            data={
-                "strategy": strategy,
-                "confidence": confidence,
-                "llm_usd": llm_cost_usd,
-                "cached": page.from_cache,
-            },
-        )
+        if persisted > 0:
+            if not page.from_cache:
+                # Fresh page that yielded valid records: counts as checked evidence for tombstones.
+                ctx.checked_sources.update({page.url, source_url, job["url"]})
+            self.store.add_event(
+                ctx.task.id, "page_extracted",
+                f"{persisted} записів ← {source_url} [{strategy}]",
+                run_id=ctx.run_id, level="debug",
+                data={
+                    "strategy": strategy,
+                    "confidence": confidence,
+                    "llm_usd": llm_cost_usd,
+                    "cached": page.from_cache,
+                },
+            )
 
     async def _process_api_list(self, page: PageContent, job: dict, ctx: RunContext) -> None:
         api_source = ctx.spec.api_source
@@ -463,7 +499,9 @@ class PipelineRunner:
                     )
                     ctx.stats.urls_total = total
         else:
-            records, rec_warnings = extract_json_records(page.html, ctx.spec, source_url)
+            records, quarantined, rec_warnings = extract_json_records_with_quarantine(
+                page.html, ctx.spec, source_url
+            )
             if rec_warnings:
                 ctx.api_list_failed = True
                 self.store.add_event(
@@ -476,11 +514,13 @@ class PipelineRunner:
                 )
                 return
             ctx.strategies["api_json"] += 1
+            if quarantined:
+                self._quarantine_items(quarantined, source_url, ctx)
             if records:
                 self._persist_records(
                     records, page, job, ctx, strategy="api_json", confidence=0.98
                 )
-            else:
+            elif not quarantined:
                 self.store.add_event(
                     ctx.task.id,
                     "no_records",
@@ -511,7 +551,9 @@ class PipelineRunner:
 
     async def _process_api_detail(self, page: PageContent, job: dict, ctx: RunContext) -> None:
         source_url = page.final_url or page.url
-        records, warnings = extract_json_records(page.html, ctx.spec, source_url)
+        records, quarantined, warnings = extract_json_records_with_quarantine(
+            page.html, ctx.spec, source_url
+        )
         if warnings:
             self.store.add_event(
                 ctx.task.id,
@@ -523,15 +565,18 @@ class PipelineRunner:
             )
             return
         ctx.strategies["api_json"] += 1
+        if quarantined:
+            self._quarantine_items(quarantined, source_url, ctx)
         if not records:
-            self.store.add_event(
-                ctx.task.id,
-                "no_records",
-                f"0 записів: {source_url}",
-                run_id=ctx.run_id,
-                level="debug",
-                data={"strategy": "api_json"},
-            )
+            if not quarantined:
+                self.store.add_event(
+                    ctx.task.id,
+                    "no_records",
+                    f"0 записів: {source_url}",
+                    run_id=ctx.run_id,
+                    level="debug",
+                    data={"strategy": "api_json"},
+                )
             return
         self._persist_records(records, page, job, ctx, strategy="api_json", confidence=0.98)
 
@@ -574,14 +619,18 @@ class PipelineRunner:
                     data={"signature": schema_signature(healed)},
                 )
 
+        if outcome.quarantined:
+            self._quarantine_items(outcome.quarantined, page.final_url or page.url, ctx)
+
         records = self.engine.to_records(outcome, page, spec)
         if not records:
-            level = "warning" if not outcome.warnings else "debug"
-            self.store.add_event(
-                ctx.task.id, "no_records", f"0 записів: {page.final_url or page.url}",
-                run_id=ctx.run_id, level=level,
-                data={"warnings": outcome.warnings[:3], "strategy": outcome.strategy},
-            )
+            if not outcome.quarantined:
+                level = "warning" if not outcome.warnings else "debug"
+                self.store.add_event(
+                    ctx.task.id, "no_records", f"0 записів: {page.final_url or page.url}",
+                    run_id=ctx.run_id, level=level,
+                    data={"warnings": outcome.warnings[:3], "strategy": outcome.strategy},
+                )
             await self._expand(page, job, ctx, empty=True)
             return
 
@@ -875,6 +924,7 @@ class PipelineRunner:
             "changes": len(changes),
             "full_crawl": ctx.full_crawl,
             "removed": ctx.stats.records_removed,
+            "quarantined": ctx.stats.records_quarantined,
             "notes": ctx.notes[:20],
             "sources": unique(
                 [normalize_domain(seed) for seed in ctx.spec.seeds if normalize_domain(seed)]
@@ -904,6 +954,7 @@ class PipelineRunner:
                 "new": ctx.stats.records_new,
                 "updated": ctx.stats.records_updated,
                 "removed": ctx.stats.records_removed,
+                "quarantined": ctx.stats.records_quarantined,
                 "failed_jobs": counts["failed"],
                 "llm_usd": round(ctx.budget.spent_usd, 4),
             },

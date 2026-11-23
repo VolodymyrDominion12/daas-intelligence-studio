@@ -24,6 +24,8 @@ class LLMRequest:
     temperature: float = 0.0
     prefer: Preference = "any"
     images: list[str] = field(default_factory=list)
+    task_id: str | None = None
+    run_id: str | None = None
 
     def cache_key(self) -> str:
         from ..utils import hash_text

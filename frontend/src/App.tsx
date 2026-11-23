@@ -4,6 +4,7 @@ import { NewTask } from './components/NewTask'
 import { Sidebar } from './components/Sidebar'
 import { TaskWorkspace } from './components/TaskWorkspace'
 import type {
+  ApiSourceSpec,
   ConfigResponse,
   EventInfo,
   TaskDetail,
@@ -136,7 +137,12 @@ export function App() {
     }
   }, [selectedId])
 
-  const createTask = async (payload: { prompt: string; seeds: string[]; title?: string }) => {
+  const createTask = async (payload: {
+    prompt: string
+    seeds: string[]
+    title?: string
+    api_source?: ApiSourceSpec | null
+  }) => {
     setCreating(true)
     try {
       const response = await api.createTask(payload)

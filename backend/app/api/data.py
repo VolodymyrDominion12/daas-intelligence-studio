@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from ..compliance import source_note
 from ..enrichment.dedupe import find_duplicates
@@ -18,6 +18,14 @@ from .deps import StudioDep
 from .schemas import ExportRequest, SourcePolicyRequest, policy_view
 
 router = APIRouter(prefix="/api", tags=["data"])
+
+
+@router.get("/metrics")
+def prometheus_metrics(studio: StudioDep) -> PlainTextResponse:
+    return PlainTextResponse(
+        content=studio.prometheus_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @router.get("/tasks/{task_id}/dataset")
@@ -98,6 +106,32 @@ def duplicates(
         "scanned": len(rows),
         "note": "Кандидати на злиття. Автоматичний merge/unmerge — наступний етап (P1).",
     }
+
+
+@router.get("/tasks/{task_id}/quarantine")
+def list_quarantine(
+    task_id: str,
+    studio: StudioDep,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    return studio.list_quarantine(task_id, limit=limit, offset=offset)
+
+
+@router.post("/tasks/{task_id}/quarantine/{item_id}/approve")
+def approve_quarantine_item(task_id: str, item_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        return studio.approve_quarantine(task_id, item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/tasks/{task_id}/quarantine/{item_id}")
+def dismiss_quarantine_item(task_id: str, item_id: str, studio: StudioDep) -> dict[str, bool]:
+    _task_or_404(studio, task_id)
+    return {"deleted": studio.dismiss_quarantine(task_id, item_id)}
 
 
 @router.post("/tasks/{task_id}/exports")

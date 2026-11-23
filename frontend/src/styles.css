@@ -1004,6 +1004,42 @@ code {
   background: var(--warn-soft);
 }
 
+.method--api_json {
+  color: #5eead4;
+  border-color: rgba(94, 234, 212, 0.3);
+  background: rgba(94, 234, 212, 0.1);
+}
+
+.api-details {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-soft);
+}
+
+.api-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-soft);
+}
+
+.api-details-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.api-summary {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .status {
   display: inline-flex;
   align-items: center;
@@ -1715,6 +1751,66 @@ code {
 .source-domain {
   color: #9fd3ff;
   font-size: 12.5px;
+}
+
+.quarantine-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quarantine-card {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--bg-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quarantine-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quarantine-source {
+  overflow-wrap: anywhere;
+}
+
+.quarantine-payload {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.quarantine-json summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.quarantine-json pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 7px;
+  background: #060a0f;
+  border: 1px solid var(--border-soft);
+  overflow-x: auto;
+  color: var(--text-soft);
+}
+
+.quarantine-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ==========================================================================

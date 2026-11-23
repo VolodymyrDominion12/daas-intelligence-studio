@@ -18,6 +18,7 @@ import type {
   TaskDetail,
   ToastMessage,
 } from '../types'
+import { AutomationPanel } from './AutomationPanel'
 import { CalibrationPanel } from './CalibrationPanel'
 import { DataGrid } from './DataGrid'
 import { DetailDrawer } from './DetailDrawer'
@@ -25,8 +26,18 @@ import { EventsPanel } from './EventsPanel'
 import { ExportPanel } from './ExportPanel'
 import { ChangesPanel, DuplicatesPanel, SourcesPanel } from './MiscPanels'
 import { PlanPanel } from './PlanPanel'
+import { QuarantinePanel } from './QuarantinePanel'
 
-type Tab = 'plan' | 'data' | 'calibration' | 'changes' | 'duplicates' | 'exports' | 'sources'
+type Tab =
+  | 'plan'
+  | 'data'
+  | 'calibration'
+  | 'automation'
+  | 'changes'
+  | 'quarantine'
+  | 'duplicates'
+  | 'exports'
+  | 'sources'
 
 interface Props {
   detail: TaskDetail
@@ -40,7 +51,9 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'plan', label: 'План' },
   { key: 'data', label: 'Дані' },
   { key: 'calibration', label: 'Калібрування' },
+  { key: 'automation', label: 'Розклад і доставка' },
   { key: 'changes', label: 'Зміни' },
+  { key: 'quarantine', label: 'Карантин' },
   { key: 'duplicates', label: 'Дублікати' },
   { key: 'exports', label: 'Експорт' },
   { key: 'sources', label: 'Джерела' },
@@ -55,6 +68,7 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
   const spec = task.spec
   const dataset = detail.dataset.dataset
   const rows = dataset?.row_count ?? 0
+  const quarantineCount = detail.quarantine_count ?? 0
   const manifest = dataset?.manifest as
     | { quality_checks?: QualityChecksReport; eval?: EvalReport }
     | undefined
@@ -210,6 +224,12 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
             <span className="stat-chip-value">−{fmtNumber(dataRun?.stats.records_removed ?? 0)}</span>
           </div>
         )}
+        {quarantineCount > 0 && (
+          <div className="stat-chip" title="Підозрілі записи в карантині">
+            <span className="stat-chip-label">Карантин</span>
+            <span className="stat-chip-value">{fmtNumber(quarantineCount)}</span>
+          </div>
+        )}
         <div className="stat-chip">
           <span className="stat-chip-label">LLM</span>
           <span className="stat-chip-value">${(dataRun?.spent_usd ?? 0).toFixed(3)}</span>
@@ -237,6 +257,9 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
             {item.key === 'data' && <span className="tab-count">{fmtNumber(rows)}</span>}
             {item.key === 'changes' && changeCount > 0 && (
               <span className="tab-count">{changeCount}</span>
+            )}
+            {item.key === 'quarantine' && quarantineCount > 0 && (
+              <span className="tab-count">{fmtNumber(quarantineCount)}</span>
             )}
           </button>
         ))}
@@ -271,7 +294,25 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
               onCalibrate={() => act('calibrate')}
             />
           )}
+          {tab === 'automation' && (
+            <AutomationPanel
+              task={task}
+              schedulerEnabled={config?.capabilities.scheduler_enabled ?? true}
+              qualityChecks={qualityChecks}
+              evalReport={evalReport}
+              onRefresh={onRefresh}
+              onToast={onToast}
+            />
+          )}
           {tab === 'changes' && <ChangesPanel taskId={task.id} refreshKey={refreshKey} />}
+          {tab === 'quarantine' && (
+            <QuarantinePanel
+              taskId={task.id}
+              refreshKey={refreshKey + quarantineCount}
+              onRefresh={onRefresh}
+              onToast={onToast}
+            />
+          )}
           {tab === 'duplicates' && <DuplicatesPanel taskId={task.id} refreshKey={refreshKey} />}
           {tab === 'exports' && (
             <ExportPanel taskId={task.id} rows={rows} onToast={onToast} />

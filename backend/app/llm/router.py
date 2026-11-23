@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..compliance import current_scope
 from ..config import Settings
 from ..db.sqlite_store import OperationalStore
 from ..utils import hash_text, iso
@@ -100,9 +101,33 @@ class LLMRouter:
 
     # -- main entrypoint --------------------------------------------------
     async def complete_json(
-        self, request: LLMRequest, *, budget: LLMBudget | None = None
+        self,
+        request: LLMRequest,
+        *,
+        budget: LLMBudget | None = None,
+        task_id: str | None = None,
+        run_id: str | None = None,
     ) -> LLMResponse:
         budget = budget or self.budget
+        scope = current_scope()
+        resolved_task_id = (
+            task_id
+            if task_id is not None
+            else (
+                request.task_id
+                if request.task_id is not None
+                else (scope.task_id if scope is not None else self.task_id)
+            )
+        )
+        resolved_run_id = (
+            run_id
+            if run_id is not None
+            else (
+                request.run_id
+                if request.run_id is not None
+                else (scope.run_id if scope is not None else self.run_id)
+            )
+        )
         ordered = self._ordered(request)
         if not ordered:
             return LLMResponse(
@@ -137,8 +162,8 @@ class LLMRouter:
                     tokens_out=response.tokens_out,
                     usd=response.usd,
                     cached=False,
-                    task_id=self.task_id,
-                    run_id=self.run_id,
+                    task_id=resolved_task_id,
+                    run_id=resolved_run_id,
                 )
             if response.ok:
                 self._cache_put(request, provider.name, response)

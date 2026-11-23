@@ -116,6 +116,32 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
           <span>{spec.enrichment.length} збагачувачів</span>
           <span>extraction: {spec.extraction}</span>
         </div>
+        {spec.api_source && (
+          <div className="api-summary">
+            <div className="meta-row">
+              <span className="chip chip--yes">JSON API</span>
+              <span className="mono-small">items: {spec.api_source.items_path}</span>
+              <span className="mono-small">id: {spec.api_source.id_path}</span>
+              {spec.api_source.cursor_path && (
+                <span className="mono-small">
+                  cursor: {spec.api_source.cursor_path} ({spec.api_source.cursor_param})
+                </span>
+              )}
+              <span className="chip">
+                {spec.api_source.incremental ? 'інкрементальний' : 'повний прохід'}
+              </span>
+            </div>
+            {Object.keys(spec.api_source.field_map).length > 0 && (
+              <div className="enrich-fields">
+                {Object.entries(spec.api_source.field_map).map(([key, path]) => (
+                  <span className="chip" key={key}>
+                    {key} ← {path}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       <section className="card">

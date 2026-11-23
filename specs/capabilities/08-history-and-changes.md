@@ -3,11 +3,11 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`) |
-| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/eval` |
+| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET /api/tasks/{id}/quarantine`, `POST /api/tasks/{id}/quarantine/{item_id}/approve`, `DELETE /api/tasks/{id}/quarantine/{item_id}`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/eval` |
 | **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|delete`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
-| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/05` §5 (D-01) |
-| **Статус** | as-built (P1-01 ✅, P1-03 ✅, D-01 ✅) |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py` |
+| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/03` §3.7 (P1-08), `docs/05` §5 (D-01) |
+| **Статус** | as-built (P1-01 ✅, P1-03 ✅, P1-08 ✅, D-01 ✅) |
 
 ## 1. Призначення
 Історія, яку конкурент не спарсить заднім числом: append-only версії кожного запису, поточний стан,
@@ -19,7 +19,8 @@ tombstones.
   content_hash, payload JSON, provenance JSON, observed_at, deleted)` — **лише INSERT** (виняток:
   відкат tombstones незавершеного запуску).
 - `current_records` (view) — остання ревізія кожного ключа, без `deleted`.
-- `quarantine` — підозрілі записи (заготовка, P1-08).
+- `quarantine(id, dataset_id, run_id, source_url, reason, payload JSON, created_at)` — підозрілі
+  записи з причиною відбраковування (P1-08).
 - Один процесний конекшн під lock (ADR-02).
 
 ## 3. Вимоги — історія і запити
@@ -198,6 +199,34 @@ Tombstone **ПОВИНЕН** ставитися лише якщо поточна
 - **Перевірка:** `tests/test_quality.py::test_gold_eval_api_json_and_html_regression_gate`,
   `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes`
 
-## 9. Відкриті питання
+## 9. Вимоги — карантин підозрілих записів (`P1-08`)
+
+### REQ-HIST-040 — Автоматичне спрямування підозрілих записів у карантин та міграція схеми
+Під час збору (`HTML` або `api_json`) система **ПОВИННА** детерміновано перевіряти кандидати
+записів і спрямовувати підозрілі в `quarantine` (з `id`, `source_url`, `payload`, `created_at` і
+причиною), коли:
+- кандидат мав ≥ 1 витягнутого поля, але після приведення типів лишається `< 2` валідних полів
+  (за `>= 2` джерельних колонок) або відсутнє ідентифікуюче поле;
+- не-порожнє значення мапленого поля в `api_json` не вдалося привести до оголошеного `dtype`;
+- середня впевненість (`mean_confidence`) запису нижча за `0.40`.
+
+Записи без помилки приведення типу і з `>= 2` валідними полями не карантиняться на рівні
+рядка (контролюються `REQ-QUAL-001`). Старі DuckDB файли без `quarantine.id` мігрують
+forward-only з backfill ідентифікаторів. Кожен елемент збільшує `stats.records_quarantined` і
+пише подію `record_quarantined` (`warning`).
+- **Перевірка:** `tests/test_quarantine.py::test_old_duckdb_quarantine_is_migrated`,
+  `tests/test_quarantine.py::test_runner_quarantines_suspect_html_and_api_records`
+
+### REQ-HIST-041 — HTTP API карантину: перегляд, підтвердження та відхилення
+Система **ПОВИННА** надавати захищені Bearer-токеном ендпоінти:
+- `GET /api/tasks/{id}/quarantine?limit&offset` — пагінований список карантину;
+- `POST /api/tasks/{id}/quarantine/{item_id}/approve` — перенесення у append-only
+  `record_versions` (`Provenance(method="manual", verified=True)`), оновлення `row_count`,
+  видалення з карантину і подія `quarantine_approved`;
+- `DELETE /api/tasks/{id}/quarantine/{item_id}` — відхилення з карантину і подія
+  `quarantine_dismissed` (`404` для невідомих `task_id`/`item_id`).
+- **Перевірка:** `tests/test_quarantine.py::test_quarantine_api_list_approve_dismiss_and_404`
+
+## 10. Відкриті питання
 - Невалідний ключ у `f_<key>` дає `ValueError` у сховищі → **HTTP 500** на API (немає мапінгу
   `ValueError → 400`). Має бути 400 «некоректна колонка» — потрібен тест на рівні API і фікс.

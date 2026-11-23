@@ -41,9 +41,9 @@
 | PII: маскування, редагування перед cloud LLM, personal завжди маскується | `app/utils.py`, `app/storage/exports.py` | `test_utils.py`, `test_storage.py` |
 | Root-robots.txt, rate limit, retry taxonomy, SSRF guard | `app/scraping/*`, `app/utils.py` | `test_utils.py` |
 | REST API + SSE + Bearer/Host guard + CSP | `app/api/*`, `app/main.py` | `test_api_flow.py` |
-| UI: Studio / Data Grid / Calibration / Changes / Export / Sources | `frontend/src/**` | headless Chrome (скріншоти в `docs/assets/`) |
+| UI: Studio / Data Grid / Calibration / Розклад і доставка / Changes / Export / Sources | `frontend/src/**` | `tsc --noEmit` + `vite build`, headless Chrome (скріншоти в `docs/assets/`) |
 | Офлайн-демо з живим джерелом | `app/demo.py`, `daas demo --serve` | ручний прогін + скріншоти |
-| Міграції SQLite, бекап, retention purge | `app/db/sqlite_store.py`, `daas backup`, `/api/maintenance/purge-cache` | частково тестами |
+| Міграції SQLite, бекап, retention purge, VPS deploy | `app/db/sqlite_store.py`, `daas backup`, `/api/maintenance/backup`, `Dockerfile`, `docker-compose.prod.yml`, `deploy/` | `test_raw_cache_backup.py`, `test_deploy_ops.py` |
 
 **Стан якості на v0.1:** 55 тестів (до інциденту Фази 0; див. §2a) (pytest, повністю офлайн), `ruff` без зауважень, frontend
 `tsc` + `vite build` без помилок. Час демо-пайплайну: кілька секунд на 4 записи.
@@ -173,15 +173,15 @@
 ### 3.6. Спостережуваність і витрати
 
 - JSON-логи у `storage/logs/` з ротацією; `run_id` у кожному рядку.
-- `/api/metrics` (Prometheus text): pages, blocked, records, llm_usd, queue depth.
-- Атрибуція витрат планування до задачі (зараз plan-виклик іде до створення task).
+- ✅ `/api/metrics` (Prometheus text, `P1-09`): pages, blocked, records, quarantine, llm_usd, queue depth, cache.
+- ✅ Атрибуція витрат планування до задачі (`P1-09`) та ізоляція ledger при паралельних запусках (`LLMRequest`/`run_scope`).
 - Дашборд: витрати на 1000 записів, hit-rate кешу, середня кількість LLM-fallback на прогін.
 
 ### 3.7. UX-борг
 
 - Редактор spec: перейменування/видалення/перестановка колонок, зміна типу, ручні селектори.
 - Schema diff після калібрування (що змінилося) + кнопка «відкотити».
-- Вкладка «Карантин»: записи, що не пройшли валідацію, з причиною.
+- ✅ Вкладка «Карантин» (`P1-08`): підозрілі записи (`HTML`/`api_json`), причина, API approve/dismiss і UI `QuarantinePanel.tsx`.
 - «Поясни цей рядок»: чому саме такі значення (provenance + сторінка + селектор).
 - Кнопка «Затвердити та запустити» після прев'ю (двофазний flow у явному вигляді).
 
@@ -226,8 +226,8 @@ merge/unmerge.
 | P1-05 | Планувальник (cron на задачу) + доганяючий прогін | M | 2 ✅ | P1-03 |
 | D-01 | Канали доставки дельти: webhook, Telegram, алерти | M | 2 ✅ | P1-05 |
 | D-02 | Джерело Prozorro (відкритий API) як перший дата-продукт | M | 2 ✅ | P1-04 |
-| P1-08 | Карантин у UI + причина | S | 3 | P1-01 |
-| P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 | — |
+| P1-08 | Карантин у UI + причина | S | 3 ✅ | P1-01 |
+| P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 ✅ | — |
 | P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 | P1-01 |
 | P1-06 | Proxy provider + circuit breaker | M | 3 | — |
 | P1-07 | JS-детекція + Playwright сайдкар | M | 3 | P1-06 |
@@ -251,13 +251,14 @@ Prozorro) → **Фаза 3 — масштаб**. P2/P3 чекають першо
    (див. §3.3). Записи з джерел, які в прогоні не обходились, не видаляються.
 2. **Перерваний прогін** може залишити record versions без рядка `dataset_versions` (часткові дані).
    Записи не втрачаються, але версія не фіксується; наступний прогін використає той самий номер.
-3. **Витрати планування** не атрибутуються задачі (задача створюється після виклику LLM).
+3. ~~**Витрати планування** не атрибутуються задачі (задача створюється після виклику LLM).~~ Закрито в P1-09
+   (`bind_llm_calls`, ізольована атрибуція на `LLMRouter`, `GET /api/tasks/{id}.spend_usd` і `/api/metrics`).
 4. ~~**Якість = заповненість**, а не точність. Precision/recall немає (P1-01).~~ Закрито в P1-01
    (`app/pipeline/quality.py`, `daas eval`, авто-інваріанти `quality_checks`).
 5. **Калібрування** зберігає одну схему на `domain + entity`; сайти з кількома шаблонами потребують
    signature на шаблон (P1-10).
 6. **Проксі/ротації немає** — один IP, per-domain rate limit.
-7. **Планувальника немає** — запуск вручну/через API.
+7. ~~**Планувальника немає** — запуск вручну/через API.~~ Закрито в P1-05 (`app/pipeline/scheduler.py` та вкладка «Розклад і доставка» в UI).
 8. **Дедуплікація** — лише кандидати, без злиття.
 9. **LLM локально** не завантажується автоматично (немає pull для Ollama); хмарний — за env.
    Планування/збір через CLI не можна запускати паралельно з `daas serve`: DuckDB має одного

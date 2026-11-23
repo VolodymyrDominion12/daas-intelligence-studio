@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built v0.1 |
+| **Статус** | as-built (P1-09) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -16,9 +16,10 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | Метод | Шлях | Призначення | Спека |
 |:---|:---|:---|:---|
 | GET | `/api/health` | стан, версія, `llm_ready` (публічний) | 11 |
+| GET | `/api/metrics` | Prometheus metrics (`text/plain; version=0.0.4`, Bearer auth) | 11 |
 | GET | `/api/config` | capabilities, overview, enrichers | 11 |
 | GET/POST | `/api/tasks` | список / створити (201) | 01 |
-| GET/PATCH/DELETE | `/api/tasks/{id}` | деталі (калібрування, датасет, запуски, активний запуск) / оновити / видалити | 01 |
+| GET/PATCH/DELETE | `/api/tasks/{id}` | деталі (калібрування, датасет, запуски, активний запуск, `quarantine_count`, `spend_usd`) / оновити / видалити | 01 |
 | PATCH | `/api/tasks/{id}/limits` | ліміти | 01 |
 | POST/DELETE | `/api/tasks/{id}/columns[/{key}]` | колонки | 01 |
 | POST | `/api/tasks/{id}/calibrate` | калібрування (query: `force`, `acknowledge_high_risk`, `reason`) | 02, 06 |
@@ -36,6 +37,8 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | POST | `/api/tasks/{id}/eval` | офлайн оцінка витягування на gold-set (`EvalRequest` → `EvalReport`) | 08 |
 | GET | `/api/tasks/{id}/events`, `/events/stream`, `/changes` | журнал, SSE, зміни | 04, 08 |
 | GET | `/api/tasks/{id}/dataset`, `/records`, `/records/{key}` | датасет, записи, історія запису | 08 |
+| GET | `/api/tasks/{id}/quarantine` | пагінований список записів у карантині | 08 |
+| POST/DELETE | `/api/tasks/{id}/quarantine/{item_id}/approve`, `/api/tasks/{id}/quarantine/{item_id}` | підтвердження запису з карантину в датасет / видалення | 08 |
 | GET | `/api/tasks/{id}/duplicates` | кандидати на дублікати | 07 |
 | POST/GET | `/api/tasks/{id}/exports`, `/api/exports`, `/api/exports/{file}` | експорт | 09 |
 | GET | `/api/dashboard` | огляд задач | 11 |
@@ -63,7 +66,8 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 ### REQ-API-003 — Host-guard (DNS-rebinding)
 Запит із `Host`, якого немає серед `127.0.0.1`, `localhost`, `::1`, `testserver`, `DAAS_HOST` і
 хостів із `DAAS_CORS_ORIGINS`, **ПОВИНЕН** отримувати 403 — навіть для публічних шляхів.
-- **Перевірка:** `tests/test_api_flow.py::test_auth_and_host_guard`
+- **Перевірка:** `tests/test_api_flow.py::test_auth_and_host_guard`,
+  `tests/test_deploy_ops.py::test_host_guard_allows_cors_domain_behind_proxy`
 
 ### REQ-API-004 — Заголовки безпеки
 Кожна відповідь **ПОВИННА** мати `X-Content-Type-Options: nosniff`, `Referrer-Policy:
@@ -103,6 +107,15 @@ LLM (REQ-LLM-003).
 `CreateTaskRequest`: `prompt` 5–4000 симв., ≤ 20 seed-ів, `title` ≤ 80. `reason` ≤ 500.
 `ExportRequest.limit` 1…1 000 000. `records.limit` ≤ 500. `events.limit` ≤ 1000.
 - **Перевірка:** — (прогалина)
+
+### REQ-API-009 — Захищений Prometheus endpoint `/api/metrics`
+Система **ПОВИННА** надавати `GET /api/metrics` (захищений Bearer-токеном згідно з `REQ-API-001`),
+що повертає метрики у текстовому форматі Prometheus (`text/plain; version=0.0.4; charset=utf-8`):
+`daas_up`, `daas_tasks_total{status}`, `daas_runs_total{status}`, `daas_queue_jobs{status}`,
+`daas_pages_fetched_total`, `daas_pages_cached_total`, `daas_pages_failed_total`,
+`daas_blocked_total{reason}`, `daas_records_current`, `daas_records_quarantined`,
+`daas_llm_spend_usd_total`, `daas_llm_calls_total`, розбивку за `purpose` та `daas_raw_cache_pages`.
+- **Перевірка:** `tests/test_metrics_and_spend.py::test_prometheus_metrics_endpoint_requires_auth_and_reports_state`
 
 ## 4. Відкриті питання
 - `ValueError` зі сховища (невалідний `f_<key>`, див. 08) не мапиться → 500. Додати глобальний

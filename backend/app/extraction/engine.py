@@ -83,10 +83,26 @@ class ExtractionEngine:
                 items = [dict(item) for item in llm_outcome.items]
 
         filled: list[dict] = []
+        quarantined: list[dict] = []
         for item in items:
+            raw_snapshot = {
+                key: value
+                for key, value in item.items()
+                if key in spec.column_map and value not in (None, "", [])
+            }
             self._fill_missing(item, spec, page)
-            if self._is_usable(item, spec):
+            reason = self._reject_reason(item, spec)
+            if reason is None:
                 filled.append(item)
+            elif raw_snapshot:
+                quarantined.append(
+                    {
+                        "payload": raw_snapshot,
+                        "reason": reason,
+                        "method": base.strategy,
+                        "confidence": base.confidence,
+                    }
+                )
 
         if not filled and not jsonld_outcome.items and not (css_outcome and css_outcome.items) and allow_llm:
             # Deterministic strategies found nothing at all: try the LLM even if items existed but were filtered.
@@ -97,9 +113,24 @@ class ExtractionEngine:
             cost += llm_outcome.llm_cost_usd
             calls += llm_outcome.llm_calls
             for item in llm_outcome.items:
+                raw_snapshot = {
+                    key: value
+                    for key, value in item.items()
+                    if key in spec.column_map and value not in (None, "", [])
+                }
                 self._fill_missing(item, spec, page)
-                if self._is_usable(item, spec):
+                reason = self._reject_reason(item, spec)
+                if reason is None:
                     filled.append(item)
+                elif raw_snapshot:
+                    quarantined.append(
+                        {
+                            "payload": raw_snapshot,
+                            "reason": reason,
+                            "method": llm_outcome.strategy,
+                            "confidence": llm_outcome.confidence,
+                        }
+                    )
             if filled:
                 base = llm_outcome
 
@@ -110,6 +141,7 @@ class ExtractionEngine:
             warnings=warnings,
             llm_cost_usd=cost,
             llm_calls=calls,
+            quarantined=quarantined,
         )
 
     def to_records(
@@ -165,23 +197,38 @@ class ExtractionEngine:
             if title:
                 item["name"] = title.split("\n")[0].strip()[:120]
 
-    def _is_usable(self, item: dict, spec: TaskSpec) -> bool:
+    def _reject_reason(self, item: dict, spec: TaskSpec) -> str | None:
         values = {key: value for key, value in item.items() if value not in (None, "", [])}
-        if len(values) < 2:
-            return False
-        identity_keys = {"name", "title", "company", "website", "phone", "email", "address"}
-        if not identity_keys & values.keys():
-            return False
-        # Validate dtypes once more (LLM output may ignore instructions).
+        failed_fields: list[str] = []
+        # Validate dtypes before counting populated fields (fixes REQ-EXT-006 coercion bug).
         for key in list(values):
             column = spec.column_map.get(key)
             if column is None:
                 values.pop(key)
+                item.pop(key, None)
                 continue
             coerced = coerce_value(values[key], column.dtype)
             if coerced in (None, "", []):
                 item.pop(key, None)
-        return len(values) >= 2
+                values.pop(key, None)
+                failed_fields.append(f"{key} ({column.dtype})")
+
+        min_fields = 1 if len(spec.source_columns()) <= 1 else 2
+        if len(values) < min_fields:
+            if failed_fields:
+                return (
+                    f"Менше {min_fields} валідних полів після приведення типів "
+                    f"(невалідні: {', '.join(failed_fields)})"
+                )
+            return f"Менше {min_fields} заповнених полів ({len(values)})"
+
+        identity_keys = {"name", "title", "company", "website", "phone", "email", "address"}
+        if not identity_keys & values.keys():
+            return "Відсутнє ідентифікаційне поле (name/title/company/website/phone/email/address)"
+        return None
+
+    def _is_usable(self, item: dict, spec: TaskSpec) -> bool:
+        return self._reject_reason(item, spec) is None
 
 
 def _same_entity(left: dict, right: dict) -> bool:

@@ -86,6 +86,8 @@ def get_task(task_id: str, studio: StudioDep) -> dict[str, Any]:
         "active_run": (
             studio.active_run(task_id).model_dump(mode="json") if studio.active_run(task_id) else None
         ),
+        "quarantine_count": studio.analytics.count_quarantine(dataset_id),
+        "spend_usd": round(studio.store.task_spend(task_id), 6),
     }
 
 

@@ -1,0 +1,37 @@
+# Production Compose для 1 VPS (studio + персистентне сховище).
+# Запуск:
+#   cp .env.example .env   # заповніть DAAS_CORS_ORIGINS=https://your-domain і DAAS_TELEGRAM_BOT_TOKEN
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Порт 8000 прив'язано лише до 127.0.0.1 — назовні має дивитися Caddy або Nginx із TLS.
+
+services:
+  studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: daas-studio
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DAAS_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAAS_HOST: "0.0.0.0"
+      DAAS_PORT: "8000"
+      DAAS_STORAGE_DIR: "/app/storage"
+    volumes:
+      - ./storage:/app/storage
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -43,6 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_record_versions_lookup
     ON record_versions(dataset_id, record_key, revision);
 
 CREATE TABLE IF NOT EXISTS quarantine (
+    id          VARCHAR,
     dataset_id  VARCHAR NOT NULL,
     run_id      VARCHAR,
     source_url  VARCHAR,
@@ -124,6 +125,24 @@ class AnalyticsStore:
                 " ON record_versions(dataset_id, record_key, revision)"
             )
 
+        q_columns = {
+            row[0]
+            for row in self._con.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'quarantine'"
+            ).fetchall()
+        }
+        if "id" not in q_columns:
+            self._con.execute("ALTER TABLE quarantine ADD COLUMN id VARCHAR")
+            null_rows = self._con.execute(
+                "SELECT rowid FROM quarantine WHERE id IS NULL"
+            ).fetchall()
+            if null_rows:
+                updates = [(uuid.uuid4().hex[:16], row[0]) for row in null_rows]
+                self._con.executemany(
+                    "UPDATE quarantine SET id = ? WHERE rowid = ?", updates
+                )
+
     def close(self) -> None:
         with self._lock:
             self._con.close()
@@ -136,6 +155,15 @@ class AnalyticsStore:
         """Flush the WAL so the .duckdb file on disk is complete before copying."""
         with self._lock:
             self._con.execute("CHECKPOINT")
+
+    def metrics_snapshot(self) -> dict[str, int]:
+        with self._lock:
+            current_row = self._con.execute("SELECT COUNT(*) FROM current_records").fetchone()
+            quarantine_row = self._con.execute("SELECT COUNT(*) FROM quarantine").fetchone()
+        return {
+            "records_current": int(current_row[0]) if current_row else 0,
+            "records_quarantined": int(quarantine_row[0]) if quarantine_row else 0,
+        }
 
     # -- writes -----------------------------------------------------------
     def append_records(
@@ -259,13 +287,85 @@ class AnalyticsStore:
 
     def quarantine(
         self, dataset_id: str, run_id: str | None, source_url: str, reason: str, payload: dict
-    ) -> None:
+    ) -> str:
+        item_id = uuid.uuid4().hex[:16]
         with self._lock:
             self._con.execute(
-                "INSERT INTO quarantine VALUES (?, ?, ?, ?, ?::JSON, ?)",
-                [dataset_id, run_id, source_url, reason, json_dumps(payload),
-                 datetime.now(UTC).replace(tzinfo=None)],
+                "INSERT INTO quarantine (id, dataset_id, run_id, source_url, reason, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?::JSON, ?)",
+                [
+                    item_id,
+                    dataset_id,
+                    run_id,
+                    source_url,
+                    reason,
+                    json_dumps(payload),
+                    datetime.now(UTC).replace(tzinfo=None),
+                ],
             )
+        return item_id
+
+    def count_quarantine(self, dataset_id: str) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) FROM quarantine WHERE dataset_id = ?", [dataset_id]
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_quarantine(
+        self, dataset_id: str, *, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        with self._lock:
+            total = self._con.execute(
+                "SELECT COUNT(*) FROM quarantine WHERE dataset_id = ?", [dataset_id]
+            ).fetchone()[0]
+            rows = self._con.execute(
+                "SELECT id, run_id, source_url, reason, payload, created_at "
+                "FROM quarantine WHERE dataset_id = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                [dataset_id, limit, offset],
+            ).fetchall()
+        items = [self._quarantine_row_to_item(row) for row in rows]
+        return {"items": items, "total": int(total), "limit": limit, "offset": offset}
+
+    def get_quarantine_item(self, dataset_id: str, item_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT id, run_id, source_url, reason, payload, created_at "
+                "FROM quarantine WHERE dataset_id = ? AND id = ?",
+                [dataset_id, item_id],
+            ).fetchone()
+        return self._quarantine_row_to_item(row) if row else None
+
+    def delete_quarantine_item(self, dataset_id: str, item_id: str) -> bool:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) FROM quarantine WHERE dataset_id = ? AND id = ?",
+                [dataset_id, item_id],
+            ).fetchone()
+            exists = bool(row and row[0] > 0)
+            if exists:
+                self._con.execute(
+                    "DELETE FROM quarantine WHERE dataset_id = ? AND id = ?",
+                    [dataset_id, item_id],
+                )
+        return exists
+
+    @staticmethod
+    def _quarantine_row_to_item(row: tuple) -> dict[str, Any]:
+        created_at = row[5]
+        if isinstance(created_at, datetime):
+            created_iso = created_at.replace(tzinfo=UTC).isoformat()
+        else:
+            created_iso = str(created_at) if created_at is not None else ""
+        return {
+            "id": str(row[0] or ""),
+            "run_id": row[1],
+            "source_url": row[2] or "",
+            "reason": row[3] or "",
+            "payload": json_loads(row[4], {}),
+            "created_at": created_iso,
+        }
 
     def delete_dataset(self, dataset_id: str) -> None:
         with self._lock:

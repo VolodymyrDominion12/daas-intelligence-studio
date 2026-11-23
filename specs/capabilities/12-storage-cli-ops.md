@@ -2,10 +2,10 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore` |
-| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
-| **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), ADR-02 |
-| **Статус** | as-built v0.1 |
+| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/README.md` |
+| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py` |
+| **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), `docs/05` §5 Тиждень 3, ADR-02 |
+| **Статус** | as-built v0.1 (`006-vps-deploy-and-ops`) |
 
 ## 1. Розкладка сховища
 
@@ -96,7 +96,7 @@
 - **Перевірка:** — (прогалина: покрито лише вручну; `test_full_pipeline` проходить той самий шлях
   на фікстурах)
 
-## 7. Вимоги — цілісність пакета
+## 7. Вимоги — цілісність пакета і деплой на VPS
 
 ### REQ-OPS-050 — Кожен модуль імпортується і не схований `.gitignore`
 Пакет `app` **ПОВИНЕН** містити очікувані підпакети; кожен модуль `app.*` імпортується; жоден
@@ -109,6 +109,20 @@
 CI **ПОВИНЕН** на кожен push/PR запускати: backend — `uv sync --extra dev`, `ruff check app tests`,
 `pytest -q` (Python 3.12); frontend — `npm ci`, `npm run build` (Node 22).
 - **Перевірка:** `.github/workflows/ci.yml` (конфігурація)
+
+### REQ-OPS-060 — Контейнерне складання та production Compose для VPS
+Репозиторій **ПОВИНЕН** містити `.dockerignore`, багатоетапний `Dockerfile` (збірка `frontend/dist` +
+Python 3.12 `uv` + `daas serve` + `HEALTHCHECK /api/health`) та `docker-compose.prod.yml` із
+прив'язкою порту лише до `127.0.0.1` та постійним томом `./storage:/app/storage`.
+- **Перевірка:** `tests/test_deploy_ops.py::test_docker_and_compose_configs_are_valid`
+
+### REQ-OPS-061 — Шаблони VPS (`systemd`, reverse proxy) та скрипт щоденного бекапу
+`deploy/` **ПОВИНЕН** містити `systemd`-юніт, `Caddyfile` для HTTPS-проксі, документацію
+`deploy/README.md` і скрипт `deploy/scripts/backup-and-upload.sh`, який при живому `/api/health`
+викликає `POST /api/maintenance/backup`, при зупиненій студії падає на `daas backup`, ротує старі
+копії за `KEEP_DAYS` і за заданого `BACKUP_REMOTE` вивантажує архів через `aws`/`rclone`.
+- **Перевірка:** `tests/test_deploy_ops.py::test_deploy_templates_and_backup_script`,
+  `tests/test_deploy_ops.py::test_host_guard_allows_cors_domain_behind_proxy`
 
 ## 8. Відомі обмеження
 - Одна студія на сховище: `daas serve` тримає DuckDB; CLI-команди, що пишуть, — лише після зупинки.
