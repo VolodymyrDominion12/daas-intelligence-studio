@@ -1,18 +1,20 @@
-# 07 — Збагачення (waterfall), AI-колонки, кандидати на дублікати
+# 07 — Збагачення (waterfall), AI-колонки, дедуплікація та злиття
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/enrichment/base.py`, `backend/app/enrichment/registry.py`, `backend/app/enrichment/site_audit.py`, `backend/app/enrichment/tech_detect.py`, `backend/app/enrichment/domain_resolver.py`, `backend/app/enrichment/ai_column.py`, `backend/app/enrichment/dedupe.py`, `backend/app/pipeline/runner.py` (`enrich`, `_enrich_row`) |
-| **API** | `POST /api/tasks/{id}/enrich {column_keys}`, `GET /api/tasks/{id}/duplicates?threshold=88`, `GET /api/config` (`enrichers`) |
-| **CLI** | `daas enrich <id> [--column k]`, `daas duplicates <id> [--threshold 88]` |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_utils.py` |
-| **Джерела** | `docs/01` модуль 3 («локальний Clay»), `docs/02` §4.2 |
-| **Статус** | as-built v0.1 |
+| **Код** | `backend/app/enrichment/base.py`, `backend/app/enrichment/registry.py`, `backend/app/enrichment/site_audit.py`, `backend/app/enrichment/tech_detect.py`, `backend/app/enrichment/domain_resolver.py`, `backend/app/enrichment/ai_column.py`, `backend/app/enrichment/dedupe.py`, `backend/app/pipeline/runner.py` (`enrich`, `_enrich_row`, `_persist_records`), `backend/app/db/sqlite_store.py` (`entity_links`), `backend/app/db/duckdb_store.py` (`get_record_revision`), `backend/app/runtime.py` (`list_duplicates`, `merge_duplicates`, `dismiss_duplicate`, `unmerge_link`) |
+| **API** | `POST /api/tasks/{id}/enrich {column_keys}`, `GET /api/tasks/{id}/duplicates?threshold=88`, `POST /api/tasks/{id}/duplicates/merge`, `POST /api/tasks/{id}/duplicates/dismiss`, `POST /api/tasks/{id}/duplicates/links/{link_id}/unmerge`, `GET /api/config` (`enrichers`) |
+| **CLI** | `daas enrich <id> [--column k]`, `daas duplicates <id> [--threshold 88]`, `daas merge <id> <canon> <merged> [--policy ...]`, `daas unmerge <id> <link_id>` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_utils.py`, `tests/test_entity_merge.py` |
+| **Джерела** | `docs/01` модуль 3 («локальний Clay»), `docs/02` §4.2, `docs/03` §3.2 (`P1-02`) |
+| **Статус** | as-built (P1-02) |
 
 ## 1. Призначення
 Додати до зібраних записів те, за що платять: контакти, соцмережі, технології, сигнали наміру,
-офіційний сайт, AI-оцінки — **не перезаписуючи** зібране. Дедуплікація в v0.1 — лише чесний список
-кандидатів, без злиття.
+офіційний сайт, AI-оцінки — **не перезаписуючи** зібране. Дедуплікація формує чергу кандидатів
+(без мовчазного автозлиття під час краулу) і дає змогу виконувати детерміноване злиття за обраною
+політикою, відхилення хибних пар, канонічний редірект при повторному зборі та повністю оборотне
+роз'єднання зі збереженням append-only історії версій.
 
 ## 2. Реєстр збагачувачів
 
@@ -68,10 +70,11 @@ AI-колонка **ПОВИННА**: викликатися лише за до�
 - **Перевірка:** `tests/test_compliance.py::test_forbidden_enrichment_target_is_audited`
 
 ### REQ-ENR-008 — Кандидати на дублікати
-`find_duplicates(rows, threshold)` **ПОВИНЕН** використовувати blocking (домен або перші 4 символи
-нормалізованої назви; записи з доменом додатково блокуються за назвою), рахувати
-`token_set_ratio` нормалізованих назв, повертати пари з `score ≥ threshold` (0–1 у відповіді), не
-більше 200, відсортовані за спаданням. **НЕ ПОВИНЕН** зливати записи.
+`find_duplicates(rows, threshold, excluded_pairs)` **ПОВИНЕН** використовувати blocking (домен `d:`,
+нормалізований телефон `p:` або перші 4 символи нормалізованої назви `n:`), рахувати
+`token_set_ratio` нормалізованих назв, виключати пари з `excluded_pairs` (`merged`/`dismissed`),
+повертати пари з `score ≥ threshold` (0–1 у відповіді), не більше 200, відсортовані за спаданням,
+із оцінкою ідентичності та прев'ю полів. Автоматичного злиття без підтвердження **НЕ ПОВИННО** бути.
 - **Перевірка:** `tests/test_utils.py::test_duplicate_candidates`,
   `tests/test_api_flow.py::test_full_pipeline` (`scanned == 3`)
 
@@ -79,6 +82,38 @@ AI-колонка **ПОВИННА**: викликатися лише за до�
 `identity_quality(payload)` **ПОВИНЕН** оцінювати, наскільки запис придатний до дедуплікації:
 домен 1.0 > телефон > назва; порожній — 0.2.
 - **Перевірка:** `tests/test_utils.py::test_duplicate_candidates`
+
+### REQ-ENR-010 — Детермінована політика злиття, інкрементальне порівняння та канонічний редірект
+Система **ПОВИННА**:
+- надавати детерміноване злиття двох записів (`merge_records`) за політикою (`confidence` | `freshness` |
+  `completeness` | `prefer_left` | `prefer_right`) та опційним `field_overrides`: порожні значення
+  одного запису заповнюються з іншого, масиви об'єднуються без дублікатів, конфлікти скалярних полів
+  вирішуються політикою, а змінені/конфліктні поля отримують `Provenance(method="merge")` із
+  посиланням на вихідне джерело (невідома політика → `ValueError`);
+- підтримувати інкрементальне виявлення дублікатів `find_incremental_duplicates` (порівняння нових
+  записів лише з наявними канонічними кандидатами через blocking по домену, телефону та префіксу назви);
+- під час інкрементального збору (`Runner._persist_records`) скеровувати оновлення раніше злитого
+  ключа на його активний `canonical_key`, не відроджуючи поглинутий дублікат окремим рядком.
+- **Перевірка:** `tests/test_entity_merge.py::test_deterministic_merge_policies_and_incremental_dedupe`,
+  `tests/test_entity_merge.py::test_incremental_collect_redirects_merged_key_to_canonical`
+
+### REQ-ENR-011 — Персистентні зв'язки сутностей, оборотне злиття та роз'єднання без втрати історії
+Система **ПОВИННА**:
+- зберігати рішення щодо пар у SQLite `entity_links` (`merged` | `dismissed` | `unmerged`, `score`,
+  `rule`, `policy`, `reviewer`, `canonical_before_rev`, `merged_before_rev`) з forward-only
+  міграцією #7 для існуючих баз;
+- під час `merge_duplicates` додавати нову append-only ревізію канонічного запису, маркувати
+  поглинутий запис tombstone-ревізією (`deleted=TRUE`), синхронізувати `row_count` і писати подію
+  `entity_merged` (при самозлитті → `ValueError`, відсутності ключа → `KeyError`, конфлікті вже
+  злитого ключа → `MergeConflictError`);
+- дозволяти `dismiss_duplicate` (`dismissed`) з виключенням пари з черги та подією `duplicate_dismissed`;
+- під час `unmerge_link` відновлювати обидва записи новими append-only ревізіями (`deleted=FALSE`,
+  включно з детермінованим перезбиранням наступних активних злиттів на тому самому канонічному ключі
+  при позачерговому роз'єднанні) **без видалення жодної історичної ревізії**, оновлювати `row_count`,
+  переводити зв'язок у `unmerged` та писати подію `entity_unmerged`.
+- **Перевірка:** `tests/test_entity_merge.py::test_old_sqlite_migrates_to_entity_links`,
+  `tests/test_entity_merge.py::test_merge_dismiss_and_reversible_unmerge_api`,
+  `tests/test_entity_merge.py::test_out_of_order_unmerge_replays_later_merges`
 
 ## 4. Спостережувана поведінка / відкриті питання
 - Через `overwrite=False` повторне збагачення **не оновлює** вже заповнені значення (включно з

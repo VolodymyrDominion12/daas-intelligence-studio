@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
-| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py` |
-| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07 |
-| **Статус** | as-built v0.1 |
+| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py` |
+| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`) |
+| **Статус** | as-built (P1-02) |
 
 ## 1. Сутності
 
@@ -21,6 +21,7 @@
 | Подія | `EventInfo` | SQLite `events` | Аудит і живий журнал (SSE) |
 | Датасет | `DatasetInfo` | SQLite `datasets`, `dataset_versions` | Версії, маніфести, якість |
 | Запис | `ExtractedRecord` | DuckDB `record_versions` | Payload + `Provenance` на кожне поле |
+| Зв'язок сутностей | `EntityLinkInfo` | SQLite `entity_links` | Pairwise рішення (`merged`/`dismissed`/`unmerged`), політика, ревізії до злиття |
 | Схема селекторів | `CssSchema` | SQLite `selector_cache` | Результат калібрування на `domain + entity` |
 | Звіт калібрування | `CalibrationReport` | SQLite `calibrations` | Прев'ю, покриття, попередження |
 | Політика джерела | `SourcePolicy` | SQLite `source_registry` | `tos_risk`, ліцензія, нотатки |
@@ -124,6 +125,7 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `records_removed`, `tombstones_skipped`, `tombstones_suspicious` | info/debug/warning | runner | Tombstones (див. 08) |
 | `record_quarantined` | warning | `pipeline/runner.py` | Підозрілий запис спрямовано в карантин (`data.reason`, `data.url`) |
 | `quarantine_approved`, `quarantine_dismissed` | info | `runtime.Studio` | Підтвердження запису в датасет або відхилення з карантину (`data.item_id`) |
+| `entity_merged`, `entity_unmerged`, `duplicate_dismissed` | info | `runtime.Studio` | Злиття дублікатів, оборотне роз'єднання або відхилення пари (`data.link_id`) |
 | `changes_detected`, `new_entity`, `removed_entity`, `field_changed`, `price_drop` | info/warning | runner | Зміни між версіями |
 | `quality_warning` | warning | `pipeline/runner.py` | Падіння кількості рядків або порожнє обов'язкове поле після прогону |
 | `eval_completed` | info/warning | `runtime.Studio` | Підсумок офлайн gold-set eval (P/R/F1 без сирих PII-значень) |

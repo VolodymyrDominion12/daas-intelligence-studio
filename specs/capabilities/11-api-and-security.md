@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built (P1-09) |
+| **Статус** | as-built (P1-02) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -39,7 +39,10 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | GET | `/api/tasks/{id}/dataset`, `/records`, `/records/{key}` | датасет, записи, історія запису | 08 |
 | GET | `/api/tasks/{id}/quarantine` | пагінований список записів у карантині | 08 |
 | POST/DELETE | `/api/tasks/{id}/quarantine/{item_id}/approve`, `/api/tasks/{id}/quarantine/{item_id}` | підтвердження запису з карантину в датасет / видалення | 08 |
-| GET | `/api/tasks/{id}/duplicates` | кандидати на дублікати | 07 |
+| GET | `/api/tasks/{id}/duplicates` | кандидати на дублікати та список `entity_links` (`items`, `links`, `scanned`, `note`) | 07, 11 |
+| POST | `/api/tasks/{id}/duplicates/merge` | злиття пари записів за обраною політикою (`MergeDuplicatesRequest`) | 07, 11 |
+| POST | `/api/tasks/{id}/duplicates/dismiss` | відхилення пари кандидатів як не-дубліката (`DismissDuplicateRequest`) | 07, 11 |
+| POST | `/api/tasks/{id}/duplicates/links/{link_id}/unmerge` | оборотне роз'єднання активного зв'язку | 07, 11 |
 | POST/GET | `/api/tasks/{id}/exports`, `/api/exports`, `/api/exports/{file}` | експорт | 09 |
 | GET | `/api/dashboard` | огляд задач | 11 |
 | GET/PUT | `/api/sources[/{domain}]` | реєстр джерел | 06 |
@@ -79,18 +82,19 @@ credentials.
 ### REQ-API-005 — Мапінг помилок
 | Виняток | HTTP | Тіло |
 |:---|:---:|:---|
-| `RunConflict` / `ActiveRunError` | 409 | `{detail}` |
+| `RunConflict` / `ActiveRunError` / `MergeConflictError` | 409 | `{detail}` |
 | `ComplianceError(needs_ack)` | 428 | `{detail, code, domains}` |
 | `ComplianceError(forbidden \| login_required)` | 403 | `{detail, code, domains}` |
 | `KeyError` (не знайдено) | 404 | `{detail}` |
 | `UnsafeUrlError` | 400 | `{detail}` |
-| `ValueError` у запуску (немає seed-ів тощо) | 400 | `{detail}` |
+| `ValueError` у запуску / злитті (немає seed-ів, однакові ключі тощо) | 400 | `{detail}` |
 | Pydantic-валідація | 422 | FastAPI default |
 
 Повідомлення для користувача — українською.
 - **Перевірка:** `tests/test_compliance.py::test_forbidden_source_is_a_hard_stop` (403),
   `tests/test_compliance.py::test_high_risk_requires_acknowledgement_and_is_audited` (428),
-  `tests/test_api_flow.py::test_full_pipeline` (409); 404/400 — прогалина
+  `tests/test_api_flow.py::test_full_pipeline` (409),
+  `tests/test_entity_merge.py::test_merge_dismiss_and_reversible_unmerge_api` (400/404/409)
 
 ### REQ-API-006 — Health і стан при старті
 `/api/health` **ПОВИНЕН** повертати `status: ok|degraded` (за `analytics.ping()`), `version`,
@@ -116,6 +120,16 @@ LLM (REQ-LLM-003).
 `daas_blocked_total{reason}`, `daas_records_current`, `daas_records_quarantined`,
 `daas_llm_spend_usd_total`, `daas_llm_calls_total`, розбивку за `purpose` та `daas_raw_cache_pages`.
 - **Перевірка:** `tests/test_metrics_and_spend.py::test_prometheus_metrics_endpoint_requires_auth_and_reports_state`
+
+### REQ-API-010 — HTTP API та CLI для merge, dismiss і unmerge дублікатів
+Система **ПОВИННА** надавати захищені Bearer-токеном ендпоінти та CLI-команди:
+- `GET /api/tasks/{id}/duplicates?threshold=88` — повертає `{items, links, scanned, note}` (без активних `merged` і `dismissed` пар, із прев'ю полів та оцінкою ідентичності);
+- `POST /api/tasks/{id}/duplicates/merge` — злиття двох записів за обраною політикою (`200`, `400` для однакових/порожніх ключів або невідомої політики, `404` для відсутньої задачі/запису, `409` при конфлікті з уже злитим ключем);
+- `POST /api/tasks/{id}/duplicates/dismiss` — відхилення пари (`200`, `400`/`404`/`409`);
+- `POST /api/tasks/{id}/duplicates/links/{link_id}/unmerge` — роз'єднання активного зв'язку (`200`, `404`/`409`);
+- CLI команди `daas merge <task_id> <canonical_key> <merged_key> [--policy ...]` та `daas unmerge <task_id> <link_id>` (ненульовий код виходу при помилці).
+- **Перевірка:** `tests/test_entity_merge.py::test_merge_dismiss_and_reversible_unmerge_api`,
+  `tests/test_entity_merge.py::test_cli_merge_and_unmerge`
 
 ## 4. Відкриті питання
 - `ValueError` зі сховища (невалідний `f_<key>`, див. 08) не мапиться → 500. Додати глобальний

@@ -354,12 +354,39 @@ class ChangeEvent(BaseModel):
     source_url: str | None = None
 
 
+MergePolicy = Literal["confidence", "freshness", "completeness", "prefer_left", "prefer_right"]
+EntityLinkStatus = Literal["merged", "dismissed", "unmerged"]
+
+
 class DuplicateCandidate(BaseModel):
     left_key: str
     right_key: str
     left_name: str
     right_name: str
     score: float
+    left_quality: float | None = None
+    right_quality: float | None = None
+    left_payload: dict[str, Any] = Field(default_factory=dict)
+    right_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class EntityLinkInfo(BaseModel):
+    """Persistent entity resolution decision (merged / dismissed / unmerged)."""
+
+    id: str
+    task_id: str
+    canonical_key: str
+    merged_key: str
+    status: EntityLinkStatus
+    score: float = 0.0
+    rule: str = "manual"
+    policy: MergePolicy = "confidence"
+    reviewer: str = "user"
+    canonical_before_rev: int | None = None
+    merged_before_rev: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    unmerged_at: datetime | None = None
 
 
 class LLMCallRecord(BaseModel):

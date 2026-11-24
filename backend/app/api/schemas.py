@@ -12,6 +12,7 @@ from ..models import (
     DeliveryFilters,
     FieldSpec,
     Limits,
+    MergePolicy,
     SourcePolicy,
     SubscriptionInfo,
     TaskSpec,
@@ -163,3 +164,22 @@ class EvalRequest(BaseModel):
     cases: list[GoldCaseInput] = Field(default_factory=list, max_length=200)
     gold_preset: str | None = Field(default=None, max_length=100)
     min_f1: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class MergeDuplicatesRequest(BaseModel):
+    canonical_key: str = Field(min_length=1, max_length=200)
+    merged_key: str = Field(min_length=1, max_length=200)
+    policy: MergePolicy = "confidence"
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rule: str = Field(default="manual", min_length=1, max_length=80)
+    reviewer: str = Field(default="user", min_length=1, max_length=80)
+    field_overrides: dict[str, Literal["left", "right"]] = Field(default_factory=dict)
+
+
+class DismissDuplicateRequest(BaseModel):
+    left_key: str = Field(min_length=1, max_length=200)
+    right_key: str = Field(min_length=1, max_length=200)
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rule: str = Field(default="manual", min_length=1, max_length=80)
+    reviewer: str = Field(default="user", min_length=1, max_length=80)
+

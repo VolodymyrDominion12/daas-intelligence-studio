@@ -17,7 +17,9 @@ tombstones.
 ## 2. Модель зберігання (DuckDB)
 - `record_versions(dataset_id, record_key, dataset_version, revision, run_id, source_url,
   content_hash, payload JSON, provenance JSON, observed_at, deleted)` — **лише INSERT** (виняток:
-  відкат tombstones незавершеного запуску).
+  відкат tombstones незавершеного запуску). Злиття й роз'єднання дублікатів (`P1-02`, див. 07)
+  також додають лише нові ревізії (`deleted=TRUE` для поглинутого ключа та відновлення обох при
+  unmerge), не видаляючи жодної історичної ревізії.
 - `current_records` (view) — остання ревізія кожного ключа, без `deleted`.
 - `quarantine(id, dataset_id, run_id, source_url, reason, payload JSON, created_at)` — підозрілі
   записи з причиною відбраковування (P1-08).

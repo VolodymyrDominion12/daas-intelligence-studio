@@ -9,13 +9,18 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from ..compliance import source_note
-from ..enrichment.dedupe import find_duplicates
-from ..models import DuplicateCandidate, SourcePolicy
+from ..models import SourcePolicy
 from ..storage.backup import create_backup
 from ..storage.exports import SUPPORTED_FORMATS, export_dataset
 from ..utils import normalize_domain, utcnow
 from .deps import StudioDep
-from .schemas import ExportRequest, SourcePolicyRequest, policy_view
+from .schemas import (
+    DismissDuplicateRequest,
+    ExportRequest,
+    MergeDuplicatesRequest,
+    SourcePolicyRequest,
+    policy_view,
+)
 
 router = APIRouter(prefix="/api", tags=["data"])
 
@@ -98,14 +103,55 @@ def get_record(task_id: str, record_key: str, studio: StudioDep) -> dict[str, An
 def duplicates(
     task_id: str, studio: StudioDep, threshold: float = Query(default=88, ge=50, le=100)
 ) -> dict[str, Any]:
-    task = _task_or_404(studio, task_id)
-    rows = studio.analytics.all_current(task.dataset_id or task.id)
-    candidates: list[DuplicateCandidate] = find_duplicates(rows, threshold=threshold)
-    return {
-        "items": [candidate.model_dump(mode="json") for candidate in candidates],
-        "scanned": len(rows),
-        "note": "Кандидати на злиття. Автоматичний merge/unmerge — наступний етап (P1).",
-    }
+    _task_or_404(studio, task_id)
+    return studio.list_duplicates(task_id, threshold=threshold)
+
+
+@router.post("/tasks/{task_id}/duplicates/merge")
+def merge_duplicates(
+    task_id: str, payload: MergeDuplicatesRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        return studio.merge_duplicates(
+            task_id,
+            canonical_key=payload.canonical_key,
+            merged_key=payload.merged_key,
+            policy=payload.policy,
+            score=payload.score,
+            rule=payload.rule,
+            reviewer=payload.reviewer,
+            field_overrides=payload.field_overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/duplicates/dismiss")
+def dismiss_duplicate(
+    task_id: str, payload: DismissDuplicateRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        return studio.dismiss_duplicate(
+            task_id,
+            left_key=payload.left_key,
+            right_key=payload.right_key,
+            score=payload.score,
+            rule=payload.rule,
+            reviewer=payload.reviewer,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/duplicates/links/{link_id}/unmerge")
+def unmerge_link(task_id: str, link_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        return studio.unmerge_link(task_id, link_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/tasks/{task_id}/quarantine")

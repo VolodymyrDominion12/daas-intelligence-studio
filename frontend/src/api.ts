@@ -6,6 +6,7 @@ import type {
   DeliveryChannel,
   DeliveryFilters,
   DuplicatesResponse,
+  EntityLinkInfo,
   EvalReport,
   EventInfo,
   ExportItem,
@@ -13,6 +14,7 @@ import type {
   FieldSpec,
   GoldCaseInput,
   Limits,
+  MergePolicy,
   QuarantineResponse,
   RecordDetail,
   RecordRow,
@@ -232,6 +234,38 @@ export const api = {
     request<RecordDetail>(`/tasks/${id}/records/${encodeURIComponent(recordKey)}`),
   duplicates: (id: string, threshold = 88) =>
     request<DuplicatesResponse>(`/tasks/${id}/duplicates?threshold=${threshold}`),
+  mergeDuplicates: (
+    id: string,
+    payload: {
+      canonical_key: string
+      merged_key: string
+      policy?: MergePolicy
+      score?: number
+      rule?: string
+      field_overrides?: Record<string, 'left' | 'right'>
+    },
+  ) =>
+    request<{ link: EntityLinkInfo; record: RecordRow | null; row_count: number }>(
+      `/tasks/${id}/duplicates/merge`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  dismissDuplicate: (
+    id: string,
+    payload: { left_key: string; right_key: string; score?: number; rule?: string },
+  ) =>
+    request<{ link: EntityLinkInfo }>(`/tasks/${id}/duplicates/dismiss`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  unmergeLink: (id: string, linkId: string) =>
+    request<{
+      link: EntityLinkInfo
+      canonical_record: RecordRow | null
+      restored_record: RecordRow | null
+      row_count: number
+    }>(`/tasks/${id}/duplicates/links/${encodeURIComponent(linkId)}/unmerge`, {
+      method: 'POST',
+    }),
   quarantine: (id: string, limit = 50, offset = 0) =>
     request<QuarantineResponse>(`/tasks/${id}/quarantine?limit=${limit}&offset=${offset}`),
   approveQuarantine: (id: string, itemId: string) =>

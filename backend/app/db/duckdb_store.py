@@ -449,6 +449,36 @@ class AnalyticsStore:
             ).fetchone()
         return self._row_to_item(row) if row else None
 
+    def get_current_revision_info(self, dataset_id: str, record_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT record_key, payload, provenance, source_url, observed_at, revision, dataset_version "
+                "FROM current_records WHERE dataset_id = ? AND record_key = ?",
+                [dataset_id, record_key],
+            ).fetchone()
+        if not row:
+            return None
+        item = self._row_to_item(row[:5])
+        item["revision"] = int(row[5])
+        item["dataset_version"] = int(row[6])
+        return item
+
+    def get_record_revision(
+        self, dataset_id: str, record_key: str, revision: int
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT record_key, payload, provenance, source_url, observed_at, revision, dataset_version "
+                "FROM record_versions WHERE dataset_id = ? AND record_key = ? AND revision = ?",
+                [dataset_id, record_key, int(revision)],
+            ).fetchone()
+        if not row:
+            return None
+        item = self._row_to_item(row[:5])
+        item["revision"] = int(row[5])
+        item["dataset_version"] = int(row[6])
+        return item
+
     def record_history(self, dataset_id: str, record_key: str, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._con.execute(

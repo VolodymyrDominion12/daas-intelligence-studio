@@ -105,20 +105,20 @@ flowchart LR
 
 | # | Спека | Код | Статус |
 |:---|:---|:---|:---|
-| 00 | [Доменна модель і каталог подій](capabilities/00-domain-model.md) | `app/models.py` | as-built v0.1 |
+| 00 | [Доменна модель і каталог подій](capabilities/00-domain-model.md) | `app/models.py` | as-built (P1-02) |
 | 01 | [Планування задачі](capabilities/01-task-planning.md) | `pipeline/planner.py`, `presets.py`, `discovery.py` | as-built (P1-09) |
 | 02 | [Калібрування](capabilities/02-calibration.md) | `pipeline/calibration.py`, `extraction/learner.py` | as-built v0.1 |
 | 03 | [Екстракція](capabilities/03-extraction.md) | `extraction/*` | as-built (P1-08) |
 | 04 | [Запуски, черга, збір](capabilities/04-runs-and-collection.md) | `runtime.py`, `pipeline/runner.py`, `db/sqlite_store.py` | as-built v0.1 |
 | 05 | [Завантаження, ввічливість, raw-кеш](capabilities/05-fetching.md) | `scraping/*`, `storage/raw_cache.py` | as-built v0.1 |
 | 06 | [Комплаєнс](capabilities/06-compliance.md) | `compliance.py` | as-built (P1-04) |
-| 07 | [Збагачення та дедуплікація](capabilities/07-enrichment.md) | `enrichment/*` | as-built v0.1 |
+| 07 | [Збагачення та дедуплікація](capabilities/07-enrichment.md) | `enrichment/*` | as-built (P1-02) |
 | 08 | [Історія, версії, зміни, tombstones](capabilities/08-history-and-changes.md) | `db/duckdb_store.py`, `pipeline/runner.py` | as-built (P1-08) |
 | 09 | [Експорт](capabilities/09-exports.md) | `storage/exports.py` | as-built (F0-01) |
 | 10 | [LLM-шар](capabilities/10-llm.md) | `llm/*` | as-built (P1-09) |
-| 11 | [HTTP API та безпека](capabilities/11-api-and-security.md) | `main.py`, `api/*` | as-built (P1-09) |
+| 11 | [HTTP API та безпека](capabilities/11-api-and-security.md) | `main.py`, `api/*` | as-built (P1-02) |
 | 12 | [Сховище, CLI, бекап, демо](capabilities/12-storage-cli-ops.md) | `config.py`, `cli.py`, `demo.py`, `storage/backup.py` | as-built v0.1 |
-| 13 | [Веб-інтерфейс](capabilities/13-frontend.md) | `frontend/src/**` | as-built (P1-08) |
+| 13 | [Веб-інтерфейс](capabilities/13-frontend.md) | `frontend/src/**` | as-built (P1-02) |
 
 Спеки v0.1 зняті з коду і тестів станом на листопад 2026 (reverse-engineered). Там, де поведінка
 здається випадковою, а не задуманою, вона позначена як **«Спостережувана поведінка / відкрите

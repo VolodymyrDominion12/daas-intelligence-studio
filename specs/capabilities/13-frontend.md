@@ -5,7 +5,7 @@
 | **Код** | `frontend/src/App.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/src/format.tsx`, `frontend/src/main.tsx`, `frontend/src/styles.css`, `frontend/src/components/*.tsx`, `frontend/vite.config.ts`, `frontend/index.html` |
 | **Тести** | немає автоматичних JS-тестів; `npm run typecheck` і `npm run build` (`tsc -b && vite build`) у CI; скріншоти `docs/assets/ui-*.png` |
 | **Джерела** | `docs/01` §4 (UI/UX), `docs/05` §5 Тиждень 3, ADR-10 |
-| **Статус** | as-built (`007-p1-08-quarantine`) |
+| **Статус** | as-built (`009-p1-02-entity-merge`) |
 
 ## 1. Призначення
 Одна сторінка-студія українською: список задач, створення задачі, робочий простір із вкладками,
@@ -24,7 +24,7 @@
 | `CalibrationPanel` | прев'ю, покриття, стратегія, попередження |
 | `AutomationPanel` | cron-розклад (UTC + пресети + 428 ack), підписки Telegram/Webhook (CRUD + test + фільтри + маскування секрету), звіт якості та запуск gold-set eval |
 | `QuarantinePanel` | пагінований перегляд підозрілих записів із причиною, датою, джерелом, JSON-прев'ю; «Підтвердити в датасет» та «Відхилити» |
-| `ChangesPanel`, `DuplicatesPanel`, `SourcesPanel` (`MiscPanels`) | зміни, кандидати на дублікати, реєстр джерел |
+| `ChangesPanel`, `DuplicatesPanel`, `SourcesPanel` (`MiscPanels`) | зміни, інтерактивна черга дублікатів (порівняння полів, вибір політики, merge/dismiss, таблиця `entity_links` з unmerge), реєстр джерел |
 | `ExportPanel` | формат, маскування PII, ліміт, список файлів |
 | `EventsPanel` | живий журнал і активний запуск |
 
@@ -89,6 +89,14 @@ UI **ПОВИНЕН** завантажити історію подій (`/events
 наявності елементів > 0), перелік відхилених записів із датою, джерелом, причиною і
 JSON-переглядом полів, кнопки «Підтвердити в датасет» та «Відхилити», а також стани
 завантаження, порожнього списку та обробку помилок.
+- **Перевірка:** `npm run typecheck`, `npm run build` (прогалина JS-рендер тестів за §4)
+
+### REQ-UI-014 — Інтерактивна черга дублікатів із merge/dismiss/unmerge у веб-інтерфейсі (`P1-02`)
+`DuplicatesPanel` і `TaskWorkspace` **ПОВИННІ** бути синхронними із API-контрактом (`types.ts`, `api.ts`) і надавати:
+- вибір порогу схожості та політики злиття (`confidence` | `freshness` | `completeness` | `prefer_left` | `prefer_right`);
+- для кожного кандидата — порівняння полів записів A і B, показ якості ідентичності, кнопки «Злити в A», «Злити в B» і «Не дублікат»;
+- перелік активних та історичних `entity_links` із кнопкою «Роз'єднати» для активних злитих записів та автоматичним оновленням лічильника рядків і таблиці даних (`onRefresh`);
+- стани завантаження, порожньої черги та показ помилок (`toast`).
 - **Перевірка:** `npm run typecheck`, `npm run build` (прогалина JS-рендер тестів за §4)
 
 ## 4. Прогалини

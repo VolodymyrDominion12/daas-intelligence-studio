@@ -76,6 +76,8 @@ class RunContext:
     api_next_cursor: str | None = None
     api_next_url: str | None = None
     seen_api_urls: set[str] = field(default_factory=set)
+    # Entity resolution redirects (merged_key -> canonical_key)
+    merge_redirects: dict[str, str] = field(default_factory=dict)
 
 
 class PipelineRunner:
@@ -151,6 +153,7 @@ class PipelineRunner:
         ctx = self._context(task, run_id, version=version)
         current_rows = self.analytics.all_current(task.dataset_id or task.id)
         ctx.known_keys = {row["record_key"] for row in current_rows}
+        ctx.merge_redirects = self.store.active_merged_key_map(task_id)
         ctx.existing = {
             row["record_key"]: {
                 "payload": row["payload"],
@@ -415,6 +418,9 @@ class PipelineRunner:
                     ctx,
                 )
                 continue
+            target_key = ctx.merge_redirects.get(record.record_key, record.record_key)
+            if target_key != record.record_key:
+                record = record.model_copy(update={"record_key": target_key})
             ctx.seen_keys.add(record.record_key)
             record = self._merge_with_existing(record, ctx)
             self.analytics.append_records(

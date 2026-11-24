@@ -19,7 +19,7 @@ from .api import data as data_routes
 from .api import tasks as task_routes
 from .compliance import ComplianceError
 from .config import PROJECT_ROOT, Settings, get_settings
-from .runtime import RunConflict, Studio
+from .runtime import MergeConflictError, RunConflict, Studio
 from .utils import UnsafeUrlError
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,10 @@ def create_app(settings: Settings | None = None, *, studio_factory=None) -> Fast
 
     @app.exception_handler(RunConflict)
     async def _conflict(_request: Request, exc: RunConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(MergeConflictError)
+    async def _merge_conflict(_request: Request, exc: MergeConflictError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(ComplianceError)

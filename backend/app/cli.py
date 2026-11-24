@@ -15,10 +15,9 @@ from .compliance import ComplianceError, source_note
 from .config import Settings, get_settings
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import OperationalStore
-from .enrichment.dedupe import find_duplicates
-from .models import DeliveryChannel, DeliveryFilters
+from .models import DeliveryChannel, DeliveryFilters, MergePolicy
 from .pipeline.quality import load_gold_set
-from .runtime import RunConflict, Studio
+from .runtime import MergeConflictError, RunConflict, Studio
 from .storage.exports import export_dataset
 from .utils import UnsafeUrlError
 
@@ -549,21 +548,88 @@ def duplicates(
     task_id: str,
     threshold: Annotated[float, typer.Option(help="Поріг схожості 0-100")] = 88,
 ) -> None:
-    """Показати кандидатів на дублікати."""
+    """Показати кандидатів на дублікати та активні зв'язки."""
     studio = _studio()
     try:
-        task = studio.store.get_task(task_id)
-        if not task:
-            raise typer.Exit(f"task not found: {task_id}")
-        rows = studio.analytics.all_current(task.dataset_id or task.id)
-        candidates = find_duplicates(rows, threshold=threshold)
+        try:
+            data = studio.list_duplicates(task_id, threshold=threshold)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        candidates = data["items"]
+        links = data["links"]
         if not candidates:
-            typer.echo("Дублікатів не знайдено")
+            typer.echo("Кандидатів на дублікати не знайдено")
         for candidate in candidates[:100]:
             typer.echo(
-                f"{candidate.score:.2f}  {candidate.left_name}  ⇄  {candidate.right_name}  "
-                f"({candidate.left_key} / {candidate.right_key})"
+                f"{candidate['score']:.2f}  {candidate['left_name']}  ⇄  {candidate['right_name']}  "
+                f"({candidate['left_key']} / {candidate['right_key']})"
             )
+        active = [lnk for lnk in links if lnk["status"] == "merged"]
+        if active:
+            typer.echo(f"\nАктивні злиття ({len(active)}):")
+            for lnk in active[:50]:
+                typer.echo(
+                    f"  {lnk['id']}  {lnk['merged_key']} → {lnk['canonical_key']} [{lnk['policy']}]"
+                )
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@app.command("merge")
+def merge_cmd(
+    task_id: str,
+    canonical_key: str,
+    merged_key: str,
+    policy: Annotated[
+        MergePolicy,
+        typer.Option(
+            "--policy",
+            help="confidence | freshness | completeness | prefer_left | prefer_right",
+        ),
+    ] = "confidence",
+    rule: Annotated[str, typer.Option("--rule", help="Правило/причина")] = "manual",
+) -> None:
+    """Злити два дублікати в канонічний запис (оборотно через unmerge)."""
+    studio = _studio()
+    try:
+        try:
+            res = studio.merge_duplicates(
+                task_id,
+                canonical_key=canonical_key,
+                merged_key=merged_key,
+                policy=policy,
+                rule=rule,
+            )
+        except (KeyError, ValueError, MergeConflictError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        link = res["link"]
+        record = res["record"] or {}
+        typer.echo(
+            f"✅ Злито link={link['id']} | {merged_key} → {canonical_key} ({policy}) | "
+            f"рядків={res['row_count']}"
+        )
+        typer.echo(json.dumps(record.get("payload") or {}, ensure_ascii=False))
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@app.command("unmerge")
+def unmerge_cmd(task_id: str, link_id: str) -> None:
+    """Роз'єднати раніше злиті записи без втрати історії."""
+    studio = _studio()
+    try:
+        try:
+            res = studio.unmerge_link(task_id, link_id)
+        except (KeyError, ValueError, MergeConflictError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        link = res["link"]
+        typer.echo(
+            f"✅ Роз'єднано link={link['id']} | {link['canonical_key']} ⇄ {link['merged_key']} | "
+            f"рядків={res['row_count']}"
+        )
     finally:
         asyncio.run(studio.aclose())
 

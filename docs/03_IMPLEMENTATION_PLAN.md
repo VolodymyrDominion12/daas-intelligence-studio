@@ -87,15 +87,19 @@
 - Післязбірні перевірки якості (`evaluate_dataset_quality`): виявляють аномальне падіння кількості записів (`DAAS_QUALITY_MAX_DROP_RATIO`, за замовчуванням `0.5`) і порожні обов'язкові не-AI колонки (`DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`, `80%`), зберігають `manifest.quality_checks`, пишуть подію `quality_warning` і надсилають алерт власнику через `DeltaDispatcher`.
 - Офлайн gold-set eval (`backend/tests/fixtures/gold/`): `daas eval --task <id> --gold <path> [--min-f1 ...]` та `POST /api/tasks/{id}/eval` рахують `precision` / `recall` / `F1` / `coverage` по полях та агреговано, `% LLM-fallback`, вартість на 1000 записів; зберігають `manifest.eval`, виводять бейдж у UI (`TaskWorkspace.tsx`) і завалюють CLI (код `1`) при падінні `F1` нижче порогу.
 
-### 3.2. Entity Resolution v2
+### 3.2. Entity Resolution v2 (✅ `P1-02`, `app/enrichment/dedupe.py`, `entity_links`)
 
-- Таблиця `entity_links` (pairwise score, rule, reviewer) + canonical record.
-- Merge policy: яке джерело перемагає при конфлікті (свіжість / довіра / повнота).
-- UI-черга «схвальні дублікати» з кнопками merge/unmerge (оборотність обов'язкова).
-- Інкрементальний режим: новий запис порівнюється з canonical-кандидатами, а не повний batch.
-- Splink — окремим batch-джобом для великих датасетів, результати матеріалізуються в `entity_links`.
+**Реалізовано:**
 
-**Готово, коли:** можна злити 2 записи, побачити merged payload, роз'єднати без втрати історії.
+- Таблиця SQLite `entity_links` (міграція №7: `canonical_key`, `merged_key`, `status`, `score`, `rule`, `policy`, `reviewer`, `canonical_before_rev`, `merged_before_rev`) + canonical record у `record_versions`.
+- Детермінована `merge_records`: політики конфліктів (`confidence` / `freshness` / `completeness` / `prefer_left` / `prefer_right`), `field_overrides`, `Provenance(method="merge")`.
+- Повністю оборотні API/CLI/UI (`POST /duplicates/merge`, `POST /duplicates/dismiss`, `POST /duplicates/links/{id}/unmerge`; `daas merge`, `daas unmerge`) із перезбиранням при позачерговому unmerge без видалення append-only історії.
+- Інкрементальне виявлення (`find_incremental_duplicates`), blocking по домену/телефону/назві та канонічний редірект `merged_key → canonical_key` у `Runner._persist_records`.
+- Інтерактивна UI-черга в `DuplicatesPanel` (порівняння полів A vs B, вибір політики, merge/dismiss, таблиця зв'язків із «Роз'єднати»).
+
+**Залишилось (P2):**
+
+- Splink batch-джобом (`P2-03`) для сотень тисяч записів поверх DuckDB із матеріалізацією рішень в `entity_links`.
 
 ### 3.3. Розклад і моніторинг
 
@@ -228,7 +232,7 @@ merge/unmerge.
 | D-02 | Джерело Prozorro (відкритий API) як перший дата-продукт | M | 2 ✅ | P1-04 |
 | P1-08 | Карантин у UI + причина | S | 3 ✅ | P1-01 |
 | P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 ✅ | — |
-| P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 | P1-01 |
+| P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 ✅ | P1-01 |
 | P1-06 | Proxy provider + circuit breaker | M | 3 | — |
 | P1-07 | JS-детекція + Playwright сайдкар | M | 3 | P1-06 |
 | P1-10 | Редактор spec + schema diff | M | 3 | — |
@@ -259,7 +263,8 @@ Prozorro) → **Фаза 3 — масштаб**. P2/P3 чекають першо
    signature на шаблон (P1-10).
 6. **Проксі/ротації немає** — один IP, per-domain rate limit.
 7. ~~**Планувальника немає** — запуск вручну/через API.~~ Закрито в P1-05 (`app/pipeline/scheduler.py` та вкладка «Розклад і доставка» в UI).
-8. **Дедуплікація** — лише кандидати, без злиття.
+8. ~~**Дедуплікація** — лише кандидати, без злиття.~~ Закрито в P1-02 (`entity_links`, детерміновані політики злиття,
+   оборотне роз'єднання без втрати історії, канонічний редірект при повторному зборі та інтерактивна UI-черга).
 9. **LLM локально** не завантажується автоматично (немає pull для Ollama); хмарний — за env.
    Планування/збір через CLI не можна запускати паралельно з `daas serve`: DuckDB має одного
    writer'а. Бекап під час роботи — `POST /api/maintenance/backup`.

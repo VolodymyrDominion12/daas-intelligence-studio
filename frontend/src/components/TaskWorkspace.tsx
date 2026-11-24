@@ -313,7 +313,14 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
               onToast={onToast}
             />
           )}
-          {tab === 'duplicates' && <DuplicatesPanel taskId={task.id} refreshKey={refreshKey} />}
+          {tab === 'duplicates' && (
+            <DuplicatesPanel
+              taskId={task.id}
+              refreshKey={refreshKey}
+              onRefresh={onRefresh}
+              onToast={onToast}
+            />
+          )}
           {tab === 'exports' && (
             <ExportPanel taskId={task.id} rows={rows} onToast={onToast} />
           )}

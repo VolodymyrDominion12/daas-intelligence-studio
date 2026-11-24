@@ -267,16 +267,47 @@ export interface RecordsResponse {
   columns: FieldSpec[]
 }
 
+export type MergePolicy =
+  | 'confidence'
+  | 'freshness'
+  | 'completeness'
+  | 'prefer_left'
+  | 'prefer_right'
+
+export type EntityLinkStatus = 'merged' | 'dismissed' | 'unmerged'
+
+export interface EntityLinkInfo {
+  id: string
+  task_id: string
+  canonical_key: string
+  merged_key: string
+  status: EntityLinkStatus
+  score: number
+  rule: string
+  policy: MergePolicy
+  reviewer: string
+  canonical_before_rev: number | null
+  merged_before_rev: number | null
+  created_at: string
+  updated_at: string
+  unmerged_at: string | null
+}
+
 export interface DuplicateCandidate {
   left_key: string
   right_key: string
   left_name: string
   right_name: string
   score: number
+  left_quality?: number | null
+  right_quality?: number | null
+  left_payload?: Record<string, unknown>
+  right_payload?: Record<string, unknown>
 }
 
 export interface DuplicatesResponse {
   items: DuplicateCandidate[]
+  links: EntityLinkInfo[]
   scanned: number
   note: string
 }

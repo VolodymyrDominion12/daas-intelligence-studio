@@ -21,6 +21,7 @@ from .config import PROJECT_ROOT, Settings, get_settings, load_runtime_token
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import ActiveRunError, OperationalStore
 from .discovery import build_search
+from .enrichment.dedupe import VALID_MERGE_POLICIES, find_duplicates, merge_records
 from .enrichment.registry import build_registry, enricher_catalog
 from .extraction.engine import ExtractionEngine
 from .llm.router import LLMRouter
@@ -30,6 +31,7 @@ from .models import (
     DeliveryFilters,
     EvalReport,
     ExtractedRecord,
+    MergePolicy,
     Provenance,
     RunInfo,
     ScheduleInfo,
@@ -59,6 +61,10 @@ logger = logging.getLogger(__name__)
 
 
 class RunConflict(RuntimeError):
+    pass
+
+
+class MergeConflictError(RuntimeError):
     pass
 
 
@@ -661,6 +667,295 @@ class Studio:
             data={"item_id": item_id, "reason": item.get("reason", "")},
         )
         return True
+
+    # ------------------------------------------------------------------
+    # entity resolution & merge/unmerge (P1-02)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _provenance_map(raw: dict[str, Any] | None) -> dict[str, Provenance]:
+        result: dict[str, Provenance] = {}
+        for key, value in (raw or {}).items():
+            if isinstance(value, Provenance):
+                result[key] = value
+                continue
+            try:
+                result[key] = Provenance.model_validate(value)
+            except Exception:  # noqa: BLE001
+                continue
+        return result
+
+    def _sync_dataset_row_count(self, dataset_id: str, version: int) -> int:
+        row_count = self.analytics.count_records(dataset_id)
+        dataset = self.store.dataset(dataset_id)
+        if dataset is None or dataset.version == 0:
+            self.store.add_dataset_version(
+                dataset_id,
+                1,
+                None,
+                row_count,
+                {"dataset_version": 1, "rows": row_count},
+            )
+        else:
+            self.store.update_version_row_count(dataset_id, version, row_count)
+        return row_count
+
+    def list_duplicates(self, task_id: str, *, threshold: float = 88.0) -> dict[str, Any]:
+        task = self._task(task_id)
+        dataset_id = task.dataset_id or task.id
+        rows = self.analytics.all_current(dataset_id)
+        excluded = self.store.excluded_duplicate_pairs(task_id)
+        candidates = find_duplicates(rows, threshold=threshold, excluded_pairs=excluded)
+        links = self.store.list_entity_links(task_id)
+        return {
+            "items": [candidate.model_dump(mode="json") for candidate in candidates],
+            "links": [link.model_dump(mode="json") for link in links],
+            "scanned": len(rows),
+            "note": "Кандидати на злиття. Оберіть політику, відхиліть пару або роз'єднайте активний зв'язок.",
+        }
+
+    def merge_duplicates(
+        self,
+        task_id: str,
+        *,
+        canonical_key: str,
+        merged_key: str,
+        policy: MergePolicy = "confidence",
+        score: float = 0.0,
+        rule: str = "manual",
+        reviewer: str = "user",
+        field_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        task = self._task(task_id)
+        canonical_key = canonical_key.strip()
+        merged_key = merged_key.strip()
+        if not canonical_key or not merged_key:
+            raise ValueError("Ключі записів не можуть бути порожніми")
+        if canonical_key == merged_key:
+            raise ValueError("Неможливо злити запис сам із собою")
+        if policy not in VALID_MERGE_POLICIES:
+            raise ValueError(f"Невідома політика злиття: {policy}")
+
+        redirects = self.store.active_merged_key_map(task_id)
+        if merged_key in redirects:
+            raise MergeConflictError(
+                f"Запис {merged_key} уже злито в {redirects[merged_key]}"
+            )
+        if canonical_key in redirects:
+            raise MergeConflictError(
+                f"Цільовий запис {canonical_key} уже поглинуто записом {redirects[canonical_key]}"
+            )
+
+        dataset_id = task.dataset_id or task.id
+        left = self.analytics.get_current_revision_info(dataset_id, canonical_key)
+        if left is None:
+            raise KeyError(f"Запис не знайдено: {canonical_key}")
+        right = self.analytics.get_current_revision_info(dataset_id, merged_key)
+        if right is None:
+            raise KeyError(f"Запис не знайдено: {merged_key}")
+
+        merged_payload, merged_prov = merge_records(
+            left, right, policy=policy, field_overrides=field_overrides
+        )
+        dataset = self.store.dataset(dataset_id)
+        version = dataset.version if dataset and dataset.version > 0 else 1
+        source_url = str(left.get("source_url") or right.get("source_url") or "")
+
+        merged_record = ExtractedRecord(
+            record_key=canonical_key,
+            payload=merged_payload,
+            provenance=merged_prov,
+            source_url=source_url,
+            content_hash=hash_text(json_dumps(merged_payload)),
+        )
+        self.analytics.append_records(dataset_id, version, None, [merged_record])
+        self.analytics.tombstone(
+            dataset_id, version, None, {merged_key: int(right["revision"])}
+        )
+        row_count = self._sync_dataset_row_count(dataset_id, version)
+
+        link = self.store.create_entity_link(
+            task_id,
+            canonical_key,
+            merged_key,
+            status="merged",
+            score=score,
+            rule=rule,
+            policy=policy,
+            reviewer=reviewer,
+            canonical_before_rev=int(left["revision"]),
+            merged_before_rev=int(right["revision"]),
+        )
+        self.store.add_event(
+            task_id,
+            "entity_merged",
+            f"Злито {merged_key} → {canonical_key} ({policy})",
+            level="info",
+            data={
+                "link_id": link.id,
+                "canonical_key": canonical_key,
+                "merged_key": merged_key,
+                "policy": policy,
+                "score": score,
+                "rule": rule,
+            },
+        )
+        saved = self.analytics.get_record(dataset_id, canonical_key)
+        return {"link": link.model_dump(mode="json"), "record": saved, "row_count": row_count}
+
+    def dismiss_duplicate(
+        self,
+        task_id: str,
+        *,
+        left_key: str,
+        right_key: str,
+        score: float = 0.0,
+        rule: str = "manual",
+        reviewer: str = "user",
+    ) -> dict[str, Any]:
+        task = self._task(task_id)
+        left_key = left_key.strip()
+        right_key = right_key.strip()
+        if not left_key or not right_key:
+            raise ValueError("Ключі записів не можуть бути порожніми")
+        if left_key == right_key:
+            raise ValueError("Неможливо відхилити пару з однакових ключів")
+
+        dataset_id = task.dataset_id or task.id
+        if self.analytics.get_record(dataset_id, left_key) is None:
+            raise KeyError(f"Запис не знайдено: {left_key}")
+        if self.analytics.get_record(dataset_id, right_key) is None:
+            raise KeyError(f"Запис не знайдено: {right_key}")
+
+        existing = self.store.find_active_pair_link(task_id, left_key, right_key)
+        if existing is not None:
+            if existing.status == "merged":
+                raise MergeConflictError("Пара вже злита в канонічний запис")
+            return {"link": existing.model_dump(mode="json")}
+
+        link = self.store.create_entity_link(
+            task_id,
+            left_key,
+            right_key,
+            status="dismissed",
+            score=score,
+            rule=rule,
+            reviewer=reviewer,
+        )
+        self.store.add_event(
+            task_id,
+            "duplicate_dismissed",
+            f"Відхилено дублікат {left_key} ↔ {right_key}",
+            level="info",
+            data={
+                "link_id": link.id,
+                "left_key": left_key,
+                "right_key": right_key,
+                "score": score,
+                "rule": rule,
+            },
+        )
+        return {"link": link.model_dump(mode="json")}
+
+    def unmerge_link(self, task_id: str, link_id: str) -> dict[str, Any]:
+        task = self._task(task_id)
+        link = self.store.get_entity_link(task_id, link_id)
+        if link is None:
+            raise KeyError(f"Зв'язок не знайдено: {link_id}")
+        if link.status != "merged":
+            raise MergeConflictError(
+                f"Зв'язок {link_id} уже не є активним злиттям (status={link.status})"
+            )
+        if link.canonical_before_rev is None or link.merged_before_rev is None:
+            raise KeyError("У зв'язку відсутні ревізії для відновлення")
+
+        dataset_id = task.dataset_id or task.id
+        canon_before = self.analytics.get_record_revision(
+            dataset_id, link.canonical_key, link.canonical_before_rev
+        )
+        merged_before = self.analytics.get_record_revision(
+            dataset_id, link.merged_key, link.merged_before_rev
+        )
+        if canon_before is None or merged_before is None:
+            raise KeyError("Не знайдено історичні ревізії для роз'єднання")
+
+        link_rev = link.canonical_before_rev or 0
+        later_links = [
+            other
+            for other in self.store.list_active_merges_for_canonical(task_id, link.canonical_key)
+            if other.id != link.id
+            and (
+                (other.canonical_before_rev or 0) > link_rev
+                or (
+                    (other.canonical_before_rev or 0) == link_rev
+                    and other.created_at > link.created_at
+                )
+            )
+        ]
+        canon_payload = dict(canon_before.get("payload") or {})
+        canon_prov = self._provenance_map(canon_before.get("provenance"))
+        canon_source = str(canon_before.get("source_url") or "")
+
+        for other in later_links:
+            if other.merged_before_rev is None:
+                continue
+            other_snap = self.analytics.get_record_revision(
+                dataset_id, other.merged_key, other.merged_before_rev
+            )
+            if other_snap is None:
+                continue
+            canon_payload, canon_prov = merge_records(
+                {
+                    "record_key": link.canonical_key,
+                    "payload": canon_payload,
+                    "provenance": canon_prov,
+                    "source_url": canon_source,
+                },
+                other_snap,
+                policy=other.policy,
+            )
+
+        canon_record = ExtractedRecord(
+            record_key=link.canonical_key,
+            payload=canon_payload,
+            provenance=canon_prov,
+            source_url=canon_source,
+            content_hash=hash_text(json_dumps(canon_payload)),
+        )
+        restored_payload = dict(merged_before.get("payload") or {})
+        restored_prov = self._provenance_map(merged_before.get("provenance"))
+        restored_source = str(merged_before.get("source_url") or "")
+        restored_record = ExtractedRecord(
+            record_key=link.merged_key,
+            payload=restored_payload,
+            provenance=restored_prov,
+            source_url=restored_source,
+            content_hash=hash_text(json_dumps(restored_payload)),
+        )
+
+        dataset = self.store.dataset(dataset_id)
+        version = dataset.version if dataset and dataset.version > 0 else 1
+        self.analytics.append_records(dataset_id, version, None, [canon_record, restored_record])
+        updated_link = self.store.mark_entity_link_unmerged(task_id, link.id)
+        assert updated_link is not None
+        row_count = self._sync_dataset_row_count(dataset_id, version)
+
+        self.store.add_event(
+            task_id,
+            "entity_unmerged",
+            f"Роз'єднано {link.canonical_key} та {link.merged_key}",
+            level="info",
+            data={
+                "link_id": link.id,
+                "canonical_key": link.canonical_key,
+                "merged_key": link.merged_key,
+            },
+        )
+        return {
+            "link": updated_link.model_dump(mode="json"),
+            "canonical_record": self.analytics.get_record(dataset_id, link.canonical_key),
+            "restored_record": self.analytics.get_record(dataset_id, link.merged_key),
+            "row_count": row_count,
+        }
 
     # ------------------------------------------------------------------
     # info

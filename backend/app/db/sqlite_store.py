@@ -20,8 +20,11 @@ from ..models import (
     CssSchema,
     DatasetInfo,
     DeliveryFilters,
+    EntityLinkInfo,
+    EntityLinkStatus,
     EventInfo,
     FieldSpec,
+    MergePolicy,
     RunInfo,
     RunStats,
     ScheduleInfo,
@@ -237,6 +240,29 @@ MIGRATIONS: list[tuple[int, str]] = [
             delivered_at TEXT,
             PRIMARY KEY (subscription_id, dedup_key)
         );
+        """,
+    ),
+    (
+        7,
+        """
+        CREATE TABLE entity_links (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            canonical_key TEXT NOT NULL,
+            merged_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            score REAL NOT NULL DEFAULT 0,
+            rule TEXT NOT NULL DEFAULT 'manual',
+            policy TEXT NOT NULL DEFAULT 'confidence',
+            reviewer TEXT NOT NULL DEFAULT 'user',
+            canonical_before_rev INTEGER,
+            merged_before_rev INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            unmerged_at TEXT
+        );
+        CREATE INDEX idx_entity_links_task ON entity_links(task_id, status);
+        CREATE INDEX idx_entity_links_pair ON entity_links(task_id, canonical_key, merged_key);
         """,
     ),
 ]
@@ -1224,6 +1250,156 @@ class OperationalStore:
                 " delivered_at = COALESCE(excluded.delivered_at, delivery_log.delivered_at)",
                 (subscription_id, dedup_key, run_id, status, attempts, error, now_str, delivered_str),
             )
+
+    # -- entity resolution links (P1-02) ----------------------------------
+    @staticmethod
+    def _to_entity_link(row: sqlite3.Row) -> EntityLinkInfo:
+        unmerged_raw = row["unmerged_at"]
+        return EntityLinkInfo(
+            id=str(row["id"]),
+            task_id=str(row["task_id"]),
+            canonical_key=str(row["canonical_key"]),
+            merged_key=str(row["merged_key"]),
+            status=str(row["status"]),  # type: ignore[arg-type]
+            score=float(row["score"] or 0.0),
+            rule=str(row["rule"] or "manual"),
+            policy=str(row["policy"] or "confidence"),  # type: ignore[arg-type]
+            reviewer=str(row["reviewer"] or "user"),
+            canonical_before_rev=(
+                int(row["canonical_before_rev"])
+                if row["canonical_before_rev"] is not None
+                else None
+            ),
+            merged_before_rev=(
+                int(row["merged_before_rev"]) if row["merged_before_rev"] is not None else None
+            ),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            unmerged_at=datetime.fromisoformat(unmerged_raw) if unmerged_raw else None,
+        )
+
+    def create_entity_link(
+        self,
+        task_id: str,
+        canonical_key: str,
+        merged_key: str,
+        *,
+        status: EntityLinkStatus,
+        score: float = 0.0,
+        rule: str = "manual",
+        policy: MergePolicy = "confidence",
+        reviewer: str = "user",
+        canonical_before_rev: int | None = None,
+        merged_before_rev: int | None = None,
+    ) -> EntityLinkInfo:
+        link_id = uuid.uuid4().hex[:16]
+        now_str = iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO entity_links(id, task_id, canonical_key, merged_key, status, score,"
+                " rule, policy, reviewer, canonical_before_rev, merged_before_rev, created_at,"
+                " updated_at, unmerged_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                (
+                    link_id,
+                    task_id,
+                    canonical_key,
+                    merged_key,
+                    status,
+                    float(score),
+                    rule,
+                    policy,
+                    reviewer,
+                    canonical_before_rev,
+                    merged_before_rev,
+                    now_str,
+                    now_str,
+                ),
+            )
+        link = self.get_entity_link(task_id, link_id)
+        assert link is not None
+        return link
+
+    def get_entity_link(self, task_id: str, link_id: str) -> EntityLinkInfo | None:
+        row = self._one(
+            "SELECT * FROM entity_links WHERE id = ? AND task_id = ?", (link_id, task_id)
+        )
+        return self._to_entity_link(row) if row else None
+
+    def list_entity_links(
+        self, task_id: str, *, status: EntityLinkStatus | None = None
+    ) -> list[EntityLinkInfo]:
+        if status is not None:
+            rows = self._all(
+                "SELECT * FROM entity_links WHERE task_id = ? AND status = ?"
+                " ORDER BY created_at DESC, rowid DESC",
+                (task_id, status),
+            )
+        else:
+            rows = self._all(
+                "SELECT * FROM entity_links WHERE task_id = ?"
+                " ORDER BY created_at DESC, rowid DESC",
+                (task_id,),
+            )
+        return [self._to_entity_link(row) for row in rows]
+
+    def list_active_merges_for_canonical(
+        self, task_id: str, canonical_key: str
+    ) -> list[EntityLinkInfo]:
+        rows = self._all(
+            "SELECT * FROM entity_links WHERE task_id = ? AND canonical_key = ?"
+            " AND status = 'merged' ORDER BY created_at ASC, rowid ASC",
+            (task_id, canonical_key),
+        )
+        return [self._to_entity_link(row) for row in rows]
+
+    def find_active_pair_link(
+        self, task_id: str, key_a: str, key_b: str
+    ) -> EntityLinkInfo | None:
+        row = self._one(
+            "SELECT * FROM entity_links WHERE task_id = ? AND status IN ('merged', 'dismissed')"
+            " AND ((canonical_key = ? AND merged_key = ?) OR (canonical_key = ? AND merged_key = ?))"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (task_id, key_a, key_b, key_b, key_a),
+        )
+        return self._to_entity_link(row) if row else None
+
+    def active_merged_key_map(self, task_id: str) -> dict[str, str]:
+        rows = self._all(
+            "SELECT canonical_key, merged_key FROM entity_links"
+            " WHERE task_id = ? AND status = 'merged' ORDER BY rowid ASC",
+            (task_id,),
+        )
+        direct = {str(r["merged_key"]): str(r["canonical_key"]) for r in rows}
+        resolved: dict[str, str] = {}
+        for mkey in direct:
+            curr = mkey
+            seen_chain: set[str] = set()
+            while curr in direct and curr not in seen_chain:
+                seen_chain.add(curr)
+                curr = direct[curr]
+            resolved[mkey] = curr
+        return resolved
+
+    def excluded_duplicate_pairs(self, task_id: str) -> set[tuple[str, str]]:
+        rows = self._all(
+            "SELECT canonical_key, merged_key FROM entity_links"
+            " WHERE task_id = ? AND status IN ('merged', 'dismissed')",
+            (task_id,),
+        )
+        return {
+            tuple(sorted((str(r["canonical_key"]), str(r["merged_key"]))))
+            for r in rows
+        }
+
+    def mark_entity_link_unmerged(self, task_id: str, link_id: str) -> EntityLinkInfo | None:
+        now_str = iso()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE entity_links SET status = 'unmerged', updated_at = ?, unmerged_at = ?"
+                " WHERE id = ? AND task_id = ? AND status = 'merged'",
+                (now_str, now_str, link_id, task_id),
+            )
+        return self.get_entity_link(task_id, link_id)
 
     # -- aggregates -------------------------------------------------------
     def overview(self) -> dict[str, Any]:

@@ -13,7 +13,7 @@
 
 | # | Зміна | Беклог | Статус |
 |:---|:---|:---|:---|
-| — | (немає активних змін) | — | — |
+| — | _(поки немає)_ | — | — |
 
 ## Архівовані зміни
 
@@ -27,3 +27,4 @@
 | 006 | [Деплой на VPS і автоматизований щоденний бекап](archive/006-vps-deploy-and-ops/spec.md) | `docs/05` Тиждень 3 | done |
 | 007 | [Карантин підозрілих записів у пайплайні та UI](archive/007-p1-08-quarantine/spec.md) | `P1-08` | done |
 | 008 | [Атрибуція plan-витрат LLM та Prometheus `/api/metrics`](archive/008-p1-09-metrics-and-spend/spec.md) | `P1-09` | done |
+| 009 | [Entity Resolution v2: merge/unmerge дублікатів + UI-черга](archive/009-p1-02-entity-merge/spec.md) | `P1-02` | done |
