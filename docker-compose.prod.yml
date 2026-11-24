@@ -1,7 +1,10 @@
-# Production Compose для 1 VPS (studio + персистентне сховище).
+# Production Compose для 1 VPS (studio + персистентне сховище + опційний Playwright-сайдкар).
 # Запуск:
 #   cp .env.example .env   # заповніть DAAS_CORS_ORIGINS=https://your-domain і DAAS_TELEGRAM_BOT_TOKEN
 #   docker compose -f docker-compose.prod.yml up -d --build
+# З JS-рендером (Playwright-сайдкар):
+#   DAAS_FETCH_ENGINE=auto DAAS_PLAYWRIGHT_SIDECAR_URL=http://playwright-sidecar:8765 \
+#   docker compose -f docker-compose.prod.yml --profile playwright up -d --build
 #
 # Порт 8000 прив'язано лише до 127.0.0.1 — назовні має дивитися Caddy або Nginx із TLS.
 
@@ -21,6 +24,8 @@ services:
       DAAS_HOST: "0.0.0.0"
       DAAS_PORT: "8000"
       DAAS_STORAGE_DIR: "/app/storage"
+      DAAS_FETCH_ENGINE: "${DAAS_FETCH_ENGINE:-http}"
+      DAAS_PLAYWRIGHT_SIDECAR_URL: "${DAAS_PLAYWRIGHT_SIDECAR_URL:-}"
     volumes:
       - ./storage:/app/storage
     healthcheck:
@@ -30,6 +35,29 @@ services:
           "python",
           "-c",
           "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  playwright-sidecar:
+    profiles: ["playwright"]
+    build:
+      context: ./deploy/playwright-sidecar
+      dockerfile: Dockerfile
+    container_name: daas-playwright-sidecar
+    restart: unless-stopped
+    expose:
+      - "8765"
+    shm_size: "512m"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)",
         ]
       interval: 30s
       timeout: 5s

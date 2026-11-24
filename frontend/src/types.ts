@@ -187,6 +187,66 @@ export interface CalibrationReport {
   estimated_llm_cost_usd: number
 }
 
+export interface SchemaFieldDiff {
+  key: string
+  selector_before: string | null
+  selector_after: string | null
+  attr_before: string | null
+  attr_after: string | null
+  dtype_before: DType | null
+  dtype_after: DType | null
+  confidence_before: number | null
+  confidence_after: number | null
+  coverage_before: number | null
+  coverage_after: number | null
+}
+
+export interface SchemaDiffReport {
+  current_version: number
+  previous_version: number | null
+  has_previous: boolean
+  has_changes: boolean
+  strategy_before: string | null
+  strategy_after: string
+  container_before: string | null
+  container_after: string | null
+  container_changed: boolean
+  item_scope_before: boolean | null
+  item_scope_after: boolean | null
+  score_before: number | null
+  score_after: number | null
+  score_delta: number | null
+  records_before: number | null
+  records_after: number
+  records_delta: number | null
+  fields_added: CssField[]
+  fields_removed: CssField[]
+  fields_changed: SchemaFieldDiff[]
+  coverage_deltas: Record<string, number>
+}
+
+export interface CalibrationHistoryEntry {
+  version: number
+  run_id: string | null
+  source: string
+  strategy: string
+  container: string | null
+  item_scope: boolean | null
+  score: number
+  records_found: number
+  pages_ok: number
+  pages_tried: number
+  fields_count: number
+  created_at: string
+}
+
+export interface CalibrationStateResponse {
+  calibration: CalibrationReport | null
+  version: number | null
+  history: CalibrationHistoryEntry[]
+  diff: SchemaDiffReport | null
+}
+
 export interface DatasetInfo {
   id: string
   task_id: string
@@ -219,6 +279,9 @@ export interface DatasetPayload {
 export interface TaskDetail {
   task: TaskInfo
   calibration: CalibrationReport | null
+  calibration_version?: number | null
+  calibration_history?: CalibrationHistoryEntry[]
+  calibration_diff?: SchemaDiffReport | null
   dataset: DatasetPayload
   runs: RunInfo[]
   active_run: RunInfo | null
@@ -328,6 +391,18 @@ export interface LLMProviderInfo {
   healthy: boolean
 }
 
+export interface JsRendererStatus {
+  mode: string
+  active_engine: string
+  sidecar_configured: boolean
+  sidecar_url: string | null
+  local_playwright: boolean
+  escalations: number
+  rendered_ok: number
+  fallbacks: number
+  errors: number
+}
+
 export interface Capabilities {
   version: string
   offline: boolean
@@ -353,6 +428,7 @@ export interface Capabilities {
     cooldown_s: number
     open_domains: number
   }
+  js_renderer?: JsRendererStatus
 }
 
 export interface Overview {
@@ -469,6 +545,7 @@ export interface ResilienceStatus {
   total_cost_usd: number
   proxies: ProxyEndpointView[]
   circuits: DomainCircuitView[]
+  js_renderer?: JsRendererStatus
 }
 
 export interface ScheduleInfo {

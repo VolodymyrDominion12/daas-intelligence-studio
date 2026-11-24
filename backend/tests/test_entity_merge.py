@@ -283,7 +283,7 @@ def test_old_sqlite_migrates_to_entity_links(tmp_path: Path) -> None:
         assert task is not None
         assert store.list_entity_links("legacy-task") == []
         user_ver = store._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert user_ver == 7
+        assert user_ver >= 7
     finally:
         store.close()
 

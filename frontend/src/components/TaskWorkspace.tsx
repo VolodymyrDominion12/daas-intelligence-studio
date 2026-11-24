@@ -124,6 +124,25 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
     }
   }
 
+  const rollbackCalibration = async (version?: number) => {
+    setBusy(true)
+    try {
+      const res = await api.rollbackCalibration(task.id, version)
+      await onRefresh()
+      onToast({
+        kind: 'success',
+        text: `Схему відкочено до v${res.rolled_back_to} (версія v${res.version ?? '?'})`,
+      })
+    } catch (error) {
+      onToast({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Помилка відкату схеми',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const refreshKey =
     (dataset?.version ?? 0) * 1000 +
     (activeRun?.stats.records_new ?? 0) +
@@ -289,9 +308,13 @@ export function TaskWorkspace({ detail, events, config, onRefresh, onToast }: Pr
           {tab === 'calibration' && (
             <CalibrationPanel
               report={detail.calibration}
+              version={detail.calibration_version}
+              history={detail.calibration_history ?? []}
+              diff={detail.calibration_diff ?? null}
               busy={busy || Boolean(activeRun)}
               canRun={spec.seeds.length > 0}
               onCalibrate={() => act('calibrate')}
+              onRollback={rollbackCalibration}
             />
           )}
           {tab === 'automation' && (

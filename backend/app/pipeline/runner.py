@@ -18,7 +18,7 @@ from ..enrichment.ai_column import AiColumns
 from ..enrichment.base import EnrichmentContext, merge_payload, provenance_for
 from ..extraction.api_json import extract_json_list_targets, extract_json_records_with_quarantine
 from ..extraction.engine import ExtractionEngine
-from ..extraction.learner import learn_schema, schema_signature
+from ..extraction.learner import apply_manual_selectors, learn_schema, schema_signature
 from ..llm.base import LLMBudget
 from ..llm.router import LLMRouter
 from ..models import (
@@ -353,6 +353,31 @@ class PipelineRunner:
         ctx.stats.pages_fetched += 1
         if page.from_cache:
             ctx.stats.pages_cached += 1
+        else:
+            if page.headers.get("x-daas-js-rendered") == "1":
+                reason = page.headers.get("x-daas-js-reason", "")
+                self.store.add_event(
+                    ctx.task.id,
+                    "js_rendered",
+                    f"JS-рендер {page.final_url or url} ({page.engine})",
+                    run_id=ctx.run_id,
+                    level="info",
+                    data={
+                        "url": page.final_url or url,
+                        "engine": page.engine,
+                        "reason": reason,
+                    },
+                )
+            elif page.headers.get("x-daas-js-fallback"):
+                fb = page.headers["x-daas-js-fallback"]
+                self.store.add_event(
+                    ctx.task.id,
+                    "js_render_fallback",
+                    f"Fallback на HTTP для {page.final_url or url}: {fb}",
+                    run_id=ctx.run_id,
+                    level="warning",
+                    data={"url": page.final_url or url, "reason": fb},
+                )
         if kind == "api_list":
             await self._process_api_list(page, job, ctx)
         elif kind == "api_detail":
@@ -701,6 +726,7 @@ class PipelineRunner:
             schema = schema_from_spec(spec)
         if schema is None and not self.settings.offline:
             schema = self._heal(page, spec, domain, ctx)
+        schema = apply_manual_selectors(schema, spec)
 
         allow_llm = (
             spec.extraction in {"auto", "llm"}

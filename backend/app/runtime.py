@@ -27,10 +27,13 @@ from .extraction.engine import ExtractionEngine
 from .llm.router import LLMRouter
 from .models import (
     ApiSourceSpec,
+    CalibrationReport,
     DeliveryChannel,
     DeliveryFilters,
+    EnrichmentSpec,
     EvalReport,
     ExtractedRecord,
+    FieldSpec,
     MergePolicy,
     Provenance,
     RunInfo,
@@ -39,13 +42,18 @@ from .models import (
     TaskInfo,
     TaskSpec,
 )
-from .pipeline.calibration import Calibrator
+from .pipeline.calibration import (
+    Calibrator,
+    build_calibration_history_entry,
+    compute_schema_diff,
+)
 from .pipeline.delivery import DeltaDispatcher
 from .pipeline.planner import Planner
 from .pipeline.quality import GoldCase, load_gold_set, resolve_gold_preset_path, run_gold_eval
 from .pipeline.runner import PipelineRunner
 from .pipeline.scheduler import TaskScheduler, next_cron_after, validate_cron
 from .scraping.fetcher import build_fetcher
+from .scraping.js_render import JsRenderStats, build_sidecar_client
 from .scraping.resilience import DomainCircuitBreaker, build_proxy_provider
 from .storage.raw_cache import RawCache
 from .utils import (
@@ -85,6 +93,10 @@ class Studio:
             threshold=self.settings.circuit_breaker_threshold,
             cooldown_s=self.settings.circuit_breaker_cooldown_s,
         )
+        self.js_stats = getattr(fetcher, "js_stats", None) or JsRenderStats()
+        self.sidecar_client = getattr(fetcher, "sidecar_client", None) or build_sidecar_client(
+            self.settings
+        )
         # Every request goes through the source-registry guard (P1-04).
         self.fetcher = PolicyGuardFetcher(
             fetcher
@@ -93,6 +105,8 @@ class Studio:
                 cache=self.cache,
                 proxy_provider=self.proxy_provider,
                 circuit_breaker=self.circuit_breaker,
+                sidecar_client=self.sidecar_client,
+                js_stats=self.js_stats,
             ),
             self.store,
         )
@@ -167,6 +181,8 @@ class Studio:
         await self.dispatcher.aclose()
         await self.router.aclose()
         await self.fetcher.aclose()
+        if self.sidecar_client is not None:
+            await self.sidecar_client.aclose()
         if self.search is not None:
             await self.search.aclose()
         self.analytics.close()
@@ -229,7 +245,174 @@ class Studio:
         if isinstance(changes.get("spec"), TaskSpec):
             for seed in changes["spec"].seeds:
                 assert_logged_out(seed)
+            for column in changes["spec"].columns:
+                self._attach_enricher_to_spec(changes["spec"], column)
         return self.store.update_task(task_id, **changes)
+
+    @staticmethod
+    def _attach_enricher_to_spec(spec: TaskSpec, field: FieldSpec) -> None:
+        mapping = {
+            "email": "site_audit",
+            "phone": "site_audit",
+            "tech_stack": "site_audit",
+            "has_online_booking": "site_audit",
+            "has_chat": "site_audit",
+            "socials": "site_audit",
+        }
+        if field.method != "enrichment" and field.key not in mapping:
+            return
+        enricher_key = mapping.get(field.key, "site_audit")
+        for item in spec.enrichment:
+            if item.enricher == enricher_key:
+                if field.key not in item.fields:
+                    item.fields.append(field.key)
+                return
+        spec.enrichment.append(EnrichmentSpec(enricher=enricher_key, fields=[field.key]))
+
+    def update_column(self, task_id: str, key: str, **updates: Any) -> TaskInfo:
+        task = self._task(task_id)
+        spec = task.spec.model_copy(deep=True)
+        index = next((idx for idx, col in enumerate(spec.columns) if col.key == key), None)
+        if index is None:
+            raise KeyError(f"Колонку {key} не знайдено")
+        current = spec.columns[index]
+        merged_data = {**current.model_dump(), **updates}
+        merged_data["key"] = current.key
+        updated_field = FieldSpec.model_validate(merged_data)
+        spec.columns[index] = updated_field
+        self._attach_enricher_to_spec(spec, updated_field)
+        validated = TaskSpec.model_validate(spec.model_dump())
+        saved = self.store.update_task(task_id, spec=validated)
+        assert saved is not None
+        self.store.add_event(
+            task_id,
+            "column_updated",
+            f"Оновлено колонку «{updated_field.title}»",
+            data={"key": key, "fields": sorted(updates.keys())},
+        )
+        return saved
+
+    def reorder_columns(self, task_id: str, keys: list[str]) -> TaskInfo:
+        task = self._task(task_id)
+        spec = task.spec.model_copy(deep=True)
+        existing_map = {col.key: col for col in spec.columns}
+        if len(keys) != len(spec.columns) or len(set(keys)) != len(keys) or set(keys) != set(existing_map):
+            raise ValueError("Список ключів має точно відповідати наявним колонкам задачі")
+        spec.columns = [existing_map[col_key] for col_key in keys]
+        validated = TaskSpec.model_validate(spec.model_dump())
+        saved = self.store.update_task(task_id, spec=validated)
+        assert saved is not None
+        self.store.add_event(
+            task_id,
+            "columns_reordered",
+            "Змінено порядок колонок задачі",
+            data={"keys": list(keys)},
+        )
+        return saved
+
+    def calibration_state(self, task_id: str) -> dict[str, Any]:
+        raw_history = self.store.list_calibration_history(task_id, limit=20)
+        history_entries = [build_calibration_history_entry(entry) for entry in raw_history]
+
+        current_report: CalibrationReport | None = None
+        current_version: int | None = None
+        prev_report: CalibrationReport | None = None
+        prev_version: int | None = None
+
+        if raw_history:
+            current_report = CalibrationReport.model_validate_json(raw_history[0]["report_json"])
+            current_version = int(raw_history[0]["version"])
+            if len(raw_history) >= 2:
+                prev_report = CalibrationReport.model_validate_json(raw_history[1]["report_json"])
+                prev_version = int(raw_history[1]["version"])
+        else:
+            raw = self.store.get_calibration(task_id)
+            if raw:
+                current_report = CalibrationReport.model_validate_json(raw)
+                current_version = 1
+
+        diff = (
+            compute_schema_diff(
+                prev_report,
+                current_report,
+                current_version=current_version or 1,
+                previous_version=prev_version,
+            )
+            if current_report is not None
+            else None
+        )
+        return {
+            "calibration": (
+                current_report.model_dump(mode="json", by_alias=True)
+                if current_report is not None
+                else None
+            ),
+            "version": current_version,
+            "history": [entry.model_dump(mode="json") for entry in history_entries],
+            "diff": diff.model_dump(mode="json") if diff is not None else None,
+        }
+
+    def rollback_calibration(self, task_id: str, *, version: int | None = None) -> dict[str, Any]:
+        task = self._task(task_id)
+        self._ensure_idle(task_id, force=False)
+        raw_history = self.store.list_calibration_history(task_id, limit=50)
+        if version is None:
+            if len(raw_history) < 2:
+                raise ValueError("Немає попередньої версії калібрування для відкату")
+            target_entry = raw_history[1]
+        else:
+            if not raw_history:
+                raise ValueError("Немає попередньої версії калібрування для відкату")
+            target_entry = self.store.get_calibration_entry(task_id, version)
+            if target_entry is None:
+                raise KeyError(f"Версію калібрування v{version} не знайдено")
+            if int(target_entry["version"]) == int(raw_history[0]["version"]):
+                raise ValueError("Ця версія калібрування вже є активною")
+
+        restored = CalibrationReport.model_validate_json(target_entry["report_json"])
+        from_version = int(raw_history[0]["version"])
+        to_version = int(target_entry["version"])
+        new_version = self.store.save_calibration(
+            task_id,
+            target_entry.get("run_id"),
+            restored.model_dump_json(by_alias=True),
+            spec_json=str(target_entry.get("spec_json") or task.spec.model_dump_json()),
+            source="rollback",
+        )
+
+        signature = f"auto:{task.spec.entity}"
+        for seed in task.spec.seeds[:1]:
+            domain = normalize_domain(seed)
+            if not domain:
+                continue
+            if restored.schema_ is not None and restored.schema_.fields:
+                self.store.save_selector(domain, signature, restored.schema_)
+            else:
+                self.store.delete_selector(domain, signature)
+
+        has_rows = self.analytics.count_records(task.dataset_id or task.id) > 0
+        next_status = "done" if has_rows else ("ready" if restored.records_found > 0 else "draft")
+        updated_task = self.store.update_task(task_id, status=next_status)
+        assert updated_task is not None
+        self.store.add_event(
+            task_id,
+            "calibration_rolled_back",
+            f"Схему калібрування відкочено до v{to_version} (нова версія v{new_version})",
+            level="info",
+            data={
+                "from_version": from_version,
+                "to_version": to_version,
+                "new_version": new_version,
+                "strategy": restored.strategy,
+                "container": restored.schema_.container if restored.schema_ else None,
+            },
+        )
+        state = self.calibration_state(task_id)
+        return {
+            **state,
+            "rolled_back_to": to_version,
+            "task": updated_task.model_dump(mode="json"),
+        }
 
     # ------------------------------------------------------------------
     # runs
@@ -973,13 +1156,21 @@ class Studio:
         }
 
     # ------------------------------------------------------------------
-    # proxy & circuit resilience (P1-06)
+    # proxy & circuit resilience (P1-06) + JS renderer (P1-07)
     # ------------------------------------------------------------------
+    def js_renderer_status(self) -> dict[str, Any]:
+        return self.js_stats.snapshot(
+            mode=self.settings.fetch_engine,
+            active_engine=self.fetcher.name,
+            sidecar_url=self.settings.playwright_sidecar_url,
+        )
+
     def resilience_status(self) -> dict[str, Any]:
         data = self.proxy_provider.snapshot()
         data["circuits"] = [
             item.model_dump(mode="json") for item in self.circuit_breaker.snapshot()
         ]
+        data["js_renderer"] = self.js_renderer_status()
         return data
 
     def reset_circuit(self, domain: str) -> dict[str, Any]:
@@ -1029,6 +1220,7 @@ class Studio:
                 "cooldown_s": self.circuit_breaker.cooldown_s,
                 "open_domains": self.circuit_breaker.open_count(),
             },
+            "js_renderer": self.js_renderer_status(),
         }
 
     def overview(self) -> dict[str, Any]:
@@ -1154,6 +1346,11 @@ class Studio:
             "# HELP daas_circuit_open_domains Number of domains currently in open circuit breaker state.",
             "# TYPE daas_circuit_open_domains gauge",
             f"daas_circuit_open_domains {open_circuits}",
+            "# HELP daas_js_renders_total Total JS-rendering outcomes across escalations and sidecar.",
+            "# TYPE daas_js_renders_total counter",
+            f'daas_js_renders_total{{result="ok"}} {int(self.js_stats.rendered_ok)}',
+            f'daas_js_renders_total{{result="fallback"}} {int(self.js_stats.fallbacks)}',
+            f'daas_js_renders_total{{result="error"}} {int(self.js_stats.errors)}',
         ])
         return "\n".join(lines) + "\n"
 

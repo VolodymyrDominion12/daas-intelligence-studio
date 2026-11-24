@@ -42,6 +42,51 @@ class Candidate:
     score: float = 0.0
 
 
+def apply_manual_selectors(schema: CssSchema | None, spec: TaskSpec) -> CssSchema | None:
+    """Overlay explicit manual CSS selectors from ``spec.columns`` onto a schema."""
+    manual_columns = [col for col in spec.columns if col.selector and not col.is_ai]
+    if not manual_columns:
+        return schema
+
+    manual_fields = {
+        col.key: CssField(
+            key=col.key,
+            selector=col.selector or "",
+            attr=col.attr,
+            dtype=col.dtype,
+            confidence=0.95,
+            aliases=list(col.aliases),
+        )
+        for col in manual_columns
+    }
+
+    if schema is None or not schema.container:
+        return CssSchema(
+            container="body",
+            item_scope=False,
+            fields=list(manual_fields.values()),
+            method="css",
+            notes=["from explicit column selectors"],
+        )
+
+    updated_fields: list[CssField] = []
+    seen: set[str] = set()
+    for field_item in schema.fields:
+        override = manual_fields.get(field_item.key)
+        if override is not None:
+            updated_fields.append(override)
+        else:
+            updated_fields.append(field_item)
+        seen.add(field_item.key)
+    for key, override in manual_fields.items():
+        if key not in seen:
+            updated_fields.append(override)
+    notes = list(schema.notes)
+    if "manual column selectors applied" not in notes:
+        notes.append("manual column selectors applied")
+    return schema.model_copy(update={"fields": updated_fields, "notes": notes})
+
+
 def learn_schema(samples: list[tuple[str, str]], spec: TaskSpec) -> CssSchema:
     """Return the best schema found across calibration samples (may be empty)."""
     best: CssSchema | None = None
@@ -67,6 +112,15 @@ def learn_schema(samples: list[tuple[str, str]], spec: TaskSpec) -> CssSchema:
         if best is None or rank > best_rank:
             best, best_rank = schema, rank
     if best is None:
+        fallback = apply_manual_selectors(None, spec)
+        if fallback is not None and samples:
+            records, coverage = _evaluate(fallback, samples, spec)
+            fallback.sample_url = samples[0][0]
+            fallback.coverage = {key: round(value * 100, 1) for key, value in coverage.items()}
+            fallback.score = round(
+                records * (sum(coverage.values()) / max(1, len(coverage))), 2
+            )
+            return fallback
         return CssSchema(container="", fields=[], method="css", notes=["no schema learned"])
     if best.score <= 0:
         best.notes.append("learned schema extracted nothing — LLM fallback recommended")
@@ -175,6 +229,18 @@ def _schema_from_group(tree, group: Group, spec: TaskSpec) -> CssSchema | None:
     for column in spec.columns:
         if column.is_ai:
             continue
+        if column.selector:
+            fields.append(
+                CssField(
+                    key=column.key,
+                    selector=column.selector,
+                    attr=column.attr,
+                    dtype=column.dtype,
+                    confidence=0.95,
+                    aliases=column.aliases,
+                )
+            )
+            continue
         assignment = _assign_column(group.children, column)
         if assignment is None and column.key == "name":
             fields.append(
@@ -214,6 +280,18 @@ def _schema_detail(tree, spec: TaskSpec) -> CssSchema | None:
     fields: list[CssField] = []
     for column in spec.columns:
         if column.is_ai or column.method == "enrichment":
+            continue
+        if column.selector:
+            fields.append(
+                CssField(
+                    key=column.key,
+                    selector=column.selector,
+                    attr=column.attr,
+                    dtype=column.dtype,
+                    confidence=0.95,
+                    aliases=column.aliases,
+                )
+            )
             continue
         chosen = _best_candidate(candidates, column)
         if chosen is None and column.key == "name":

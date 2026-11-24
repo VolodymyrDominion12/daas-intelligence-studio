@@ -5,9 +5,9 @@
 | **Код** | `backend/app/runtime.py` (`Studio`), `backend/app/pipeline/runner.py` (`PipelineRunner.collect`, `_process_job*`, `_process_api_list`, `_process_api_detail`, `_extract_page`, `_expand`, `_heal`, `_finish_dataset`), `backend/app/pipeline/scheduler.py` (`TaskScheduler`, `parse_cron`, `validate_cron`, `next_cron_after`), `backend/app/db/sqlite_store.py` (`runs`, `jobs`, `events`, `llm_calls`, `api_state`, `schedules`) |
 | **API** | `POST /api/tasks/{id}/run`, `GET /api/tasks/{id}/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/cancel`, `GET /api/tasks/{id}/events[?after]`, `GET /api/tasks/{id}/events/stream`, `GET/PUT/DELETE /api/tasks/{id}/schedule`, `GET /api/schedules` |
 | **CLI** | `daas collect <id> [--pages N] [--ack-high-risk --reason]`, `daas schedule set\|show\|list\|delete` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_proxy_resilience.py` |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py` |
 | **Джерела** | ADR-02, `docs/03` §2, `docs/03` §3.3, `docs/03` §3.4 |
-| **Статус** | as-built (P1-06) |
+| **Статус** | as-built (P1-07) |
 
 ## 1. Призначення
 Запуск (`calibrate/collect/enrich/snapshot`) — фонова asyncio-задача в процесі студії. Збір іде
@@ -170,6 +170,12 @@ URL з обліковими даними.
 - якщо у політиці джерела (`SourcePolicy`) для домену задано дзеркальні/API `fallback_urls`, перемикати заблокований запит (один раз на URL, без зациклення) на дозволений `assert_logged_out` та `PolicyGuardFetcher` fallback URL і записувати подію `circuit_fallback`;
 - задачі черги, пропущені через `circuit_open`, позначати як `skipped`, зберігаючи консервативний інваріант tombstones (`full_crawl=false`, існуючі записи не видаляються).
 - **Перевірка:** `tests/test_proxy_resilience.py::test_pipeline_circuit_breaker_fallback_and_compliance_guard`
+
+### REQ-RUN-060 — Події та діагностика JS-рендерингу в пайплайні і калібруванні
+Під час калібрування (`Calibrator`) і збору (`PipelineRunner`) система **ПОВИННА**:
+- при успішній автоматичній ескалації сторінки в JS-рендер (не з кешу) записувати подію `js_rendered` (`info`) з `url`, `engine` та причиною детекції;
+- при fallback через недоступність або транзитну помилку JS-рендера записувати подію `js_render_fallback` (`warning`) і додавати попередження до `CalibrationReport.warnings` (як при fallback, так і при виявленні JS-оболонки у режимі `fetch_engine="http"`).
+- **Перевірка:** `tests/test_js_sidecar.py::test_pipeline_events_metrics_api_doctor_and_sidecar_deploy`
 
 ## 5. Спостережувана поведінка / відкриті питання
 - Після вичерпання `DAAS_MAX_LLM_CALLS_PER_RUN` подія `llm_limit` пишеться на **кожній** ітерації

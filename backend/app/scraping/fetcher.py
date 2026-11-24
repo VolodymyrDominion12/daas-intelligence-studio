@@ -23,6 +23,15 @@ from ..utils import (
     normalize_domain,
     utcnow,
 )
+from .js_render import (
+    JsRenderStats,
+    PlaywrightSidecarClient,
+    SidecarRenderError,
+    SidecarResponse,
+    build_sidecar_client,
+    detect_js_shell,
+    local_playwright_available,
+)
 from .page import html_to_markdown, html_to_text
 from .politeness import (
     DomainRateLimiter,
@@ -93,6 +102,8 @@ class HttpFetcher:
         circuit_breaker: DomainCircuitBreaker | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         client_factory: Callable[[str | None], httpx.AsyncClient] | None = None,
+        sidecar_client: PlaywrightSidecarClient | None = None,
+        js_stats: JsRenderStats | None = None,
     ) -> None:
         self.settings = settings
         self.cache = cache
@@ -110,6 +121,10 @@ class HttpFetcher:
         self._client_factory = client_factory
         self._proxy_clients: dict[str, httpx.AsyncClient] = {}
         self._client = self._new_client(proxy_url=None)
+        self.sidecar_client = (
+            sidecar_client if sidecar_client is not None else build_sidecar_client(settings)
+        )
+        self.js_stats = js_stats or JsRenderStats()
 
     def _new_client(self, *, proxy_url: str | None) -> httpx.AsyncClient:
         if self._client_factory is not None:
@@ -144,6 +159,8 @@ class HttpFetcher:
             if id(client) not in seen_ids:
                 seen_ids.add(id(client))
                 await client.aclose()
+        if self.sidecar_client is not None:
+            await self.sidecar_client.aclose()
         await self.robots.aclose()
 
     def _finalize_circuit(
@@ -396,6 +413,7 @@ class HttpFetcher:
                             error=f"HTTP {response.status_code}: {ban_reason}{proxy_note}",
                         )
 
+                extra_headers: dict[str, str] = dict(response.headers)
                 if is_json and not is_html_xml:
                     page = PageContent(
                         url=url,
@@ -407,16 +425,50 @@ class HttpFetcher:
                         content_hash=hash_text(body),
                         fetched_at=utcnow(),
                         engine=self.name,
-                        headers={key.lower(): value for key, value in response.headers.items()},
+                        headers={key.lower(): value for key, value in extra_headers.items()},
                         elapsed_ms=elapsed_ms,
                     )
                 else:
+                    shell_reason = (
+                        detect_js_shell(body, min_text_chars=self.settings.js_min_text_chars)
+                        if is_html_xml
+                        else None
+                    )
+                    if shell_reason and self.settings.fetch_engine == "auto":
+                        rendered_result, fallback_reason = await self._try_js_render(
+                            url,
+                            domain=target_domain,
+                            proxy=proxy,
+                            reason=shell_reason,
+                        )
+                        if rendered_result is not None:
+                            if rendered_result.ok and rendered_result.page is not None and self.cache is not None:
+                                self.cache.put(rendered_result.page)
+                            return rendered_result
+                        extra_headers["x-daas-js-fallback"] = fallback_reason or shell_reason
+                        page = self._build_page(
+                            url=url,
+                            final_url=str(response.url),
+                            status=response.status_code,
+                            html=body,
+                            headers=extra_headers,
+                            elapsed_ms=elapsed_ms,
+                        )
+                        if proxy is not None:
+                            self.proxy_provider.report_outcome(
+                                proxy.id, target_domain, "ok", bytes_transferred=total_bytes
+                            )
+                        return FetchResult(page=page, status=response.status_code)
+
+                    if shell_reason and self.settings.fetch_engine == "http":
+                        extra_headers["x-daas-js-shell"] = shell_reason
+
                     page = self._build_page(
                         url=url,
                         final_url=str(response.url),
                         status=response.status_code,
                         html=body,
-                        headers=dict(response.headers),
+                        headers=extra_headers,
                         elapsed_ms=elapsed_ms,
                     )
                 if proxy is not None:
@@ -433,6 +485,181 @@ class HttpFetcher:
             )
         return FetchResult(kind="permanent", error="too many redirects")
 
+    async def _try_js_render(
+        self,
+        url: str,
+        *,
+        domain: str,
+        proxy: ProxyEndpoint | None,
+        reason: str,
+    ) -> tuple[FetchResult | None, str | None]:
+        self.js_stats.escalations += 1
+        if self.sidecar_client is not None:
+            try:
+                rendered = await self.sidecar_client.render(
+                    url,
+                    user_agent=self.settings.user_agent,
+                    timeout_s=self.settings.request_timeout_s,
+                    proxy_url=proxy.url if proxy is not None else None,
+                )
+            except SidecarRenderError as exc:
+                self.js_stats.errors += 1
+                self.js_stats.fallbacks += 1
+                logger.warning("Playwright sidecar fallback for %s: %s", url, exc)
+                return None, f"{reason}; sidecar error: {exc}"
+            validated = self._validate_rendered_response(
+                url,
+                rendered,
+                domain=domain,
+                proxy=proxy,
+                engine="playwright-sidecar",
+                reason=reason,
+            )
+            if validated.ok:
+                self.js_stats.rendered_ok += 1
+                return validated, None
+            if validated.kind == "transient":
+                self.js_stats.errors += 1
+                self.js_stats.fallbacks += 1
+                return None, f"{reason}; {validated.error or 'transient render error'}"
+            return validated, None
+
+        if local_playwright_available():
+            try:
+                rendered = await _render_with_local_playwright(
+                    url,
+                    user_agent=self.settings.user_agent,
+                    timeout_s=self.settings.request_timeout_s,
+                    wait_until=self.settings.playwright_wait_until,
+                    wait_ms=self.settings.playwright_wait_ms,
+                    proxy_url=proxy.url if proxy is not None else None,
+                )
+            except Exception as exc:  # pragma: no cover - optional local browser
+                self.js_stats.errors += 1
+                self.js_stats.fallbacks += 1
+                return None, f"{reason}; playwright error: {type(exc).__name__}: {exc}"
+            validated = self._validate_rendered_response(
+                url,
+                rendered,
+                domain=domain,
+                proxy=proxy,
+                engine="playwright",
+                reason=reason,
+            )
+            if validated.ok:
+                self.js_stats.rendered_ok += 1
+                return validated, None
+            if validated.kind == "transient":
+                self.js_stats.errors += 1
+                self.js_stats.fallbacks += 1
+                return None, f"{reason}; {validated.error or 'transient render error'}"
+            return validated, None
+
+        self.js_stats.fallbacks += 1
+        return None, f"{reason}; JS-рендерер не налаштований"
+
+    def _validate_rendered_response(
+        self,
+        url: str,
+        rendered: SidecarResponse,
+        *,
+        domain: str,
+        proxy: ProxyEndpoint | None,
+        engine: str,
+        reason: str | None = None,
+    ) -> FetchResult:
+        final_url = rendered.final_url or url
+        try:
+            assert_public_url(final_url, allow_private=self.settings.allow_private_network)
+        except UnsafeUrlError as exc:
+            return FetchResult(kind="unsafe", error=str(exc))
+
+        if self.redirect_guard is not None:
+            blocked = self.redirect_guard(final_url)
+            if blocked:
+                return FetchResult(
+                    kind="policy",
+                    status=rendered.status_code,
+                    error=f"redirect: {blocked}",
+                )
+
+        body = rendered.html[:FETCH_MAX_BYTES]
+        total_bytes = len(body.encode("utf-8", errors="ignore"))
+        status_kind = classify_status(rendered.status_code)
+        if status_kind == "blocked":
+            if proxy is not None:
+                self.proxy_provider.report_outcome(
+                    proxy.id, domain, "blocked", bytes_transferred=total_bytes
+                )
+            return FetchResult(
+                kind="blocked",
+                status=rendered.status_code,
+                error=f"HTTP {rendered.status_code} (anti-bot or paywall?)",
+            )
+        if status_kind == "transient":
+            if proxy is not None:
+                self.proxy_provider.report_outcome(
+                    proxy.id, domain, "transient", bytes_transferred=total_bytes
+                )
+            return FetchResult(
+                kind="transient",
+                status=rendered.status_code,
+                error=f"HTTP {rendered.status_code}",
+            )
+        if status_kind == "permanent":
+            if proxy is not None:
+                self.proxy_provider.report_outcome(
+                    proxy.id, domain, "ok", bytes_transferred=total_bytes
+                )
+            return FetchResult(
+                kind="permanent",
+                status=rendered.status_code,
+                error=f"HTTP {rendered.status_code}",
+            )
+
+        if not body.strip():
+            if proxy is not None:
+                self.proxy_provider.report_outcome(
+                    proxy.id, domain, "transient", bytes_transferred=total_bytes
+                )
+            return FetchResult(
+                kind="empty",
+                status=rendered.status_code,
+                error="empty response body",
+            )
+
+        ban_reason = detect_ban_marker(body, rendered.status_code)
+        if ban_reason is not None:
+            if proxy is not None:
+                self.proxy_provider.report_outcome(
+                    proxy.id, domain, "blocked", bytes_transferred=total_bytes
+                )
+            proxy_note = f" via {redact_proxy_url(proxy.url)}" if proxy else ""
+            return FetchResult(
+                kind="blocked",
+                status=rendered.status_code,
+                error=f"HTTP {rendered.status_code}: {ban_reason}{proxy_note}",
+            )
+
+        headers = dict(rendered.headers)
+        headers["x-daas-js-rendered"] = "1"
+        if reason:
+            headers["x-daas-js-reason"] = reason
+        page = self._build_page(
+            url=url,
+            final_url=final_url,
+            status=rendered.status_code,
+            html=body,
+            headers=headers,
+            elapsed_ms=rendered.elapsed_ms,
+            engine=engine,
+        )
+        if proxy is not None:
+            self.proxy_provider.report_outcome(
+                proxy.id, domain, "ok", bytes_transferred=total_bytes
+            )
+        return FetchResult(page=page, status=rendered.status_code)
+
     def _build_page(
         self,
         *,
@@ -442,6 +669,7 @@ class HttpFetcher:
         html: str,
         headers: dict[str, str],
         elapsed_ms: int = 0,
+        engine: str | None = None,
     ) -> PageContent:
         return PageContent(
             url=url,
@@ -452,26 +680,119 @@ class HttpFetcher:
             markdown=html_to_markdown(html, final_url),
             content_hash=hash_text(html),
             fetched_at=utcnow(),
-            engine=self.name,
+            engine=engine or self.name,
             headers={key.lower(): value for key, value in headers.items()},
             elapsed_ms=elapsed_ms,
         )
 
 
+class SidecarPlaywrightFetcher(HttpFetcher):
+    """JS-rendering fetcher delegating HTML pages to an external Playwright sidecar."""
+
+    name = "playwright-sidecar"
+
+    def __init__(self, settings: Settings, *, sidecar_client: PlaywrightSidecarClient, **kwargs) -> None:
+        super().__init__(settings, sidecar_client=sidecar_client, **kwargs)
+
+    async def _attempt(
+        self,
+        url: str,
+        *,
+        allow_json: bool = False,
+        domain: str = "",
+        proxy: ProxyEndpoint | None = None,
+    ) -> FetchResult:
+        if allow_json:
+            return await super()._attempt(url, allow_json=True, domain=domain, proxy=proxy)
+
+        assert self.sidecar_client is not None
+        target_domain = domain or normalize_domain(url) or urlsplit(url).hostname or "unknown"
+        async with self.limiter.global_sem, self.limiter.domain_slot(url):
+            await self.limiter.wait_turn(url)
+            try:
+                rendered = await self.sidecar_client.render(
+                    url,
+                    user_agent=self.settings.user_agent,
+                    timeout_s=self.settings.request_timeout_s,
+                    proxy_url=proxy.url if proxy is not None else None,
+                )
+            except SidecarRenderError as exc:
+                self.js_stats.errors += 1
+                if proxy is not None:
+                    self.proxy_provider.report_outcome(proxy.id, target_domain, "error")
+                return FetchResult(kind="transient", error=str(exc))
+
+        validated = self._validate_rendered_response(
+            url,
+            rendered,
+            domain=target_domain,
+            proxy=proxy,
+            engine=self.name,
+        )
+        if validated.ok and validated.page is not None:
+            self.js_stats.rendered_ok += 1
+            if self.cache is not None:
+                self.cache.put(validated.page)
+        elif validated.kind == "transient":
+            self.js_stats.errors += 1
+        return validated
+
+
+async def _render_with_local_playwright(
+    url: str,
+    *,
+    user_agent: str,
+    timeout_s: float,
+    wait_until: Literal["networkidle", "domcontentloaded", "load"] = "domcontentloaded",
+    wait_ms: int = 700,
+    proxy_url: str | None = None,
+) -> SidecarResponse:  # pragma: no cover - needs optional local browser
+    from playwright.async_api import async_playwright
+
+    started = time.monotonic()
+    async with async_playwright() as pw:
+        launch_kwargs: dict = {"headless": True}
+        if proxy_url:
+            launch_kwargs["proxy"] = {"server": proxy_url}
+        browser = await pw.chromium.launch(**launch_kwargs)
+        try:
+            page = await browser.new_page(user_agent=user_agent)
+            try:
+                response = await page.goto(
+                    url,
+                    timeout=int(max(1.0, timeout_s) * 1000),
+                    wait_until=wait_until,
+                )
+                if wait_ms > 0:
+                    await page.wait_for_timeout(wait_ms)
+                html = await page.content()
+                return SidecarResponse(
+                    url=url,
+                    final_url=page.url or url,
+                    status_code=response.status if response else 200,
+                    html=html,
+                    headers=dict(response.headers) if response else {},
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                )
+            finally:
+                await page.close()
+        finally:
+            await browser.close()
+
+
 class PlaywrightFetcher(HttpFetcher):
-    """Optional JS-rendering fetcher (``pip install playwright && playwright install chromium``)."""
+    """Optional local JS-rendering fetcher (``pip install -e '.[browser]' && playwright install chromium``)."""
 
     name = "playwright"
 
     def __init__(self, settings: Settings, **kwargs) -> None:
         super().__init__(settings, **kwargs)
-        try:
-            import playwright.async_api  # noqa: F401
-        except ImportError as exc:  # pragma: no cover - optional dependency
+        if not local_playwright_available():  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "Playwright is not installed. Install with: pip install playwright && playwright install chromium"
-            ) from exc
+            )
         self._browser = None
+        self._playwright = None
 
     async def _attempt(
         self,
@@ -481,36 +802,66 @@ class PlaywrightFetcher(HttpFetcher):
         domain: str = "",
         proxy: ProxyEndpoint | None = None,
     ) -> FetchResult:  # pragma: no cover - needs a browser
+        if allow_json:
+            return await super()._attempt(url, allow_json=True, domain=domain, proxy=proxy)
+
         from playwright.async_api import async_playwright
 
+        target_domain = domain or normalize_domain(url) or urlsplit(url).hostname or "unknown"
         if self._browser is None:
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(headless=True)
-        page = await self._browser.new_page(user_agent=self.settings.user_agent)
+        started = time.monotonic()
+        context_kwargs: dict = {"user_agent": self.settings.user_agent}
+        if proxy is not None:
+            context_kwargs["proxy"] = {"server": proxy.url}
+        context = await self._browser.new_context(**context_kwargs)
+        page = await context.new_page()
         try:
             response = await page.goto(
-                url, timeout=self.settings.request_timeout_s * 1000, wait_until="domcontentloaded"
+                url,
+                timeout=self.settings.request_timeout_s * 1000,
+                wait_until=self.settings.playwright_wait_until,
             )
-            await page.wait_for_timeout(700)
+            if self.settings.playwright_wait_ms > 0:
+                await page.wait_for_timeout(self.settings.playwright_wait_ms)
             html = await page.content()
-            built = self._build_page(
+            rendered = SidecarResponse(
                 url=url,
-                final_url=page.url,
-                status=response.status if response else 200,
+                final_url=page.url or url,
+                status_code=response.status if response else 200,
                 html=html,
                 headers=dict(response.headers) if response else {},
+                elapsed_ms=int((time.monotonic() - started) * 1000),
             )
-            if self.cache is not None:
-                self.cache.put(built)
-            return FetchResult(page=built, status=built.status_code)
+            validated = self._validate_rendered_response(
+                url,
+                rendered,
+                domain=target_domain,
+                proxy=proxy,
+                engine=self.name,
+            )
+            if validated.ok and validated.page is not None:
+                self.js_stats.rendered_ok += 1
+                if self.cache is not None:
+                    self.cache.put(validated.page)
+            elif validated.kind == "transient":
+                self.js_stats.errors += 1
+            return validated
         except Exception as exc:  # pragma: no cover
+            self.js_stats.errors += 1
+            if proxy is not None:
+                self.proxy_provider.report_outcome(proxy.id, target_domain, "error")
             return FetchResult(kind="transient", error=f"{type(exc).__name__}: {exc}")
         finally:
             await page.close()
+            await context.close()
 
     async def aclose(self) -> None:  # pragma: no cover
         if self._browser is not None:
             await self._browser.close()
+        if getattr(self, "_playwright", None) is not None:
+            await self._playwright.stop()
         await super().aclose()
 
 
@@ -522,8 +873,25 @@ def build_fetcher(
     limiter: DomainRateLimiter | None = None,
     proxy_provider: ProxyProvider | None = None,
     circuit_breaker: DomainCircuitBreaker | None = None,
+    sidecar_client: PlaywrightSidecarClient | None = None,
+    js_stats: JsRenderStats | None = None,
 ) -> Fetcher:
+    stats = js_stats or JsRenderStats()
+    effective_sidecar = (
+        sidecar_client if sidecar_client is not None else build_sidecar_client(settings)
+    )
     if settings.fetch_engine == "playwright":
+        if effective_sidecar is not None:
+            return SidecarPlaywrightFetcher(
+                settings,
+                sidecar_client=effective_sidecar,
+                cache=cache,
+                robots=robots,
+                limiter=limiter,
+                proxy_provider=proxy_provider,
+                circuit_breaker=circuit_breaker,
+                js_stats=stats,
+            )
         try:
             return PlaywrightFetcher(
                 settings,
@@ -532,6 +900,8 @@ def build_fetcher(
                 limiter=limiter,
                 proxy_provider=proxy_provider,
                 circuit_breaker=circuit_breaker,
+                sidecar_client=None,
+                js_stats=stats,
             )
         except RuntimeError as exc:
             logger.warning("%s — falling back to plain HTTP", exc)
@@ -542,6 +912,8 @@ def build_fetcher(
         limiter=limiter,
         proxy_provider=proxy_provider,
         circuit_breaker=circuit_breaker,
+        sidecar_client=effective_sidecar if settings.fetch_engine == "auto" else None,
+        js_stats=stats,
     )
 
 

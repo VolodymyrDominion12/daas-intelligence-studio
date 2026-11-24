@@ -2,11 +2,11 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/scraping/fetcher.py` (`HttpFetcher`, `PlaywrightFetcher`, `FetchResult`, `build_fetcher`), `backend/app/scraping/resilience.py` (`ProxyProvider`, `NoopProxyProvider`, `PoolProxyProvider`, `build_proxy_provider`, `DomainCircuitBreaker`, `detect_ban_marker`, `redact_proxy_url`), `backend/app/scraping/politeness.py` (`RobotsGate`, `DomainRateLimiter`, `classify_status`), `backend/app/scraping/page.py`, `backend/app/storage/raw_cache.py`, `backend/app/utils.py` (`assert_public_url`, `canonical_url`) |
+| **Код** | `backend/app/scraping/fetcher.py` (`HttpFetcher`, `SidecarPlaywrightFetcher`, `PlaywrightFetcher`, `FetchResult`, `build_fetcher`), `backend/app/scraping/js_render.py` (`detect_js_shell`, `JsRenderStats`, `PlaywrightSidecarClient`, `build_sidecar_client`), `backend/app/scraping/resilience.py` (`ProxyProvider`, `NoopProxyProvider`, `PoolProxyProvider`, `build_proxy_provider`, `DomainCircuitBreaker`, `detect_ban_marker`, `redact_proxy_url`), `backend/app/scraping/politeness.py` (`RobotsGate`, `DomainRateLimiter`, `classify_status`), `backend/app/scraping/page.py`, `backend/app/storage/raw_cache.py`, `backend/app/utils.py` (`assert_public_url`, `canonical_url`) |
 | **API** | `POST /api/maintenance/purge-cache?older_than_days=N`, `GET /api/resilience`, `POST /api/resilience/circuits/{domain}/reset` |
-| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/test_open_api_source.py`, `tests/test_proxy_resilience.py`, `tests/conftest.py` (`FixtureFetcher`) |
+| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/test_open_api_source.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/conftest.py` (`FixtureFetcher`) |
 | **Джерела** | ADR-03, ADR-09, `docs/02` §2.1, `docs/03` §3.4 |
-| **Статус** | as-built (P1-06) |
+| **Статус** | as-built (P1-07) |
 
 ## 1. Призначення
 Отримати HTML публічної сторінки ввічливо (robots, rate limit, User-Agent), безпечно (SSRF, ліміт
@@ -77,10 +77,12 @@ empty, policy, circuit_open}`, `status`, `error`. `page is None` ⇔ відмо�
 - **Перевірка:** `tests/test_raw_cache_backup.py::test_max_age_and_purge`,
   `tests/test_api_flow.py::test_task_editing_and_column_management` (endpoint)
 
-### REQ-FETCH-009 — Опційний JS-рушій
-`DAAS_FETCH_ENGINE=playwright` **МОЖЕ** вмикати `PlaywrightFetcher`; якщо Playwright не
-встановлено — попередження і fallback на HTTP. Playwright не входить у базові залежності.
-- **Перевірка:** — (прогалина)
+### REQ-FETCH-009 — Опційний JS-рушій і сайдкар без залежностей у ядрі
+`DAAS_FETCH_ENGINE=playwright|auto` **ПОВИНЕН** підтримувати зовнішній Playwright-сайдкар
+(`DAAS_PLAYWRIGHT_SIDECAR_URL`) у пріоритеті перед опційним локальним `PlaywrightFetcher` (`[browser]`
+extra); якщо жоден JS-рендерер не налаштовано/не встановлено — попередження і безпечний fallback
+на HTTP. Playwright не входить у базові залежності ядра.
+- **Перевірка:** `tests/test_js_sidecar.py::test_playwright_sidecar_enforces_ssrf_policy_and_circuit_breaker`
 
 ### REQ-FETCH-010 — Тести без мережі
 Тести **ПОВИННІ** використовувати `FixtureFetcher` (локальні HTML з `tests/fixtures/`) або
@@ -109,6 +111,21 @@ empty, policy, circuit_open}`, `status`, `error`. `page is None` ⇔ відмо�
 - зберігати можливість ручного скидання стану circuit breaker для домену.
 - **Перевірка:** `tests/test_proxy_resilience.py::test_http_fetcher_ban_detection_and_circuit_breaker_lifecycle`
 
+### REQ-FETCH-030 — Детермінована детекція порожнього JS-DOM і режим `auto`
+Система **ПОВИННА**:
+- надавати детермінований детектор `detect_js_shell`, який класифікує HTML як порожню SPA-оболонку, коли видимого тексту менше за `DAAS_JS_MIN_TEXT_CHARS`, відсутні JSON-LD і антибот-маркери бану та наявні ознаки SPA (`#root`/`#app`/`#__next`/`#__nuxt`/`app-root`, `<noscript>` із вимогою JS або модульні JS-бандли);
+- у режимі `DAAS_FETCH_ENGINE=auto` спершу виконувати HTTP-запит і ескалювати до JS-рендера лише при виявленні JS-оболонки (ігноруючи JSON API `allow_json=True`), кешуючи в `RawCache` вже відрендерений DOM;
+- при недоступності або транзитній помилці JS-рендера в режимі `auto` повертати вихідний HTTP-результат із позначкою fallback (`x-daas-js-fallback`) без аварійного падіння запуску.
+- **Перевірка:** `tests/test_js_sidecar.py::test_detect_js_shell_heuristics`,
+  `tests/test_js_sidecar.py::test_auto_fetch_escalates_js_shell_caches_and_falls_back`
+
+### REQ-FETCH-031 — Playwright-сайдкар, безпека редиректів і інтеграція з проксі/circuit breaker
+Система **ПОВИННА**:
+- забезпечувати легкий HTTP-клієнт `PlaywrightSidecarClient` (`DAAS_PLAYWRIGHT_SIDECAR_URL`, `DAAS_PLAYWRIGHT_WAIT_UNTIL`, `DAAS_PLAYWRIGHT_WAIT_MS`) та ізольований Docker-шаблон сайдкара (`deploy/playwright-sidecar/`) з профілем `playwright` у `docker-compose.prod.yml`;
+- для кожного рендера зберігати pre-fetch (`assert_public_url`, `robots.txt`, `DomainCircuitBreaker`, `DomainRateLimiter`, `PolicyGuardFetcher`) та post-render перевірки `final_url` (SSRF, `redirect_guard`, `logged-out`), класифікацію статусів, детекцію банів `detect_ban_marker`, облік проксі `ProxyProvider` і `DomainCircuitBreaker`.
+- **Перевірка:** `tests/test_js_sidecar.py::test_playwright_sidecar_enforces_ssrf_policy_and_circuit_breaker`,
+  `tests/test_js_sidecar.py::test_js_api_metrics_doctor_and_sidecar_deploy`
+
 ## 4. Спостережувана поведінка / відкриті питання
 - `Crawl-delay` зберігається під `urlsplit(url).hostname`, а `wait_turn` шукає RPS під
   `normalize_domain(url)` (без `www.`). Для хостів `www.*` затримка з robots.txt, схоже, не
@@ -117,4 +134,4 @@ empty, policy, circuit_open}`, `status`, `error`. `page is None` ⇔ відмо�
   query, кешуються окремо. Бажано?
 
 ## 5. Прогалини
-REQ-FETCH-003…005, 006 (ліміт 6 МБ), 009 — немає тестів реального `HttpFetcher` з `httpx.MockTransport`.
+REQ-FETCH-003…005, 006 (ліміт 6 МБ) — немає тестів реального `HttpFetcher` з `httpx.MockTransport`.

@@ -265,6 +265,34 @@ MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX idx_entity_links_pair ON entity_links(task_id, canonical_key, merged_key);
         """,
     ),
+    (
+        8,
+        """
+        CREATE TABLE calibration_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL,
+            run_id TEXT,
+            report_json TEXT NOT NULL,
+            spec_json TEXT NOT NULL DEFAULT '{}',
+            source TEXT NOT NULL DEFAULT 'calibrate',
+            created_at TEXT NOT NULL,
+            UNIQUE(task_id, version)
+        );
+        CREATE INDEX idx_calibration_history_task ON calibration_history(task_id, version DESC);
+        CREATE TABLE IF NOT EXISTS calibrations (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            run_id TEXT,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO calibration_history(
+            task_id, version, run_id, report_json, spec_json, source, created_at
+        )
+        SELECT task_id, 1, run_id, report_json, '{}', 'legacy', created_at
+        FROM calibrations;
+        """,
+    ),
 ]
 
 
@@ -685,19 +713,56 @@ class OperationalStore:
         )
 
     # -- calibration ------------------------------------------------------
-    def save_calibration(self, task_id: str, run_id: str | None, report_json: str) -> None:
-        with self._lock:
-            self._conn.execute(
+    def save_calibration(
+        self,
+        task_id: str,
+        run_id: str | None,
+        report_json: str,
+        *,
+        spec_json: str = "{}",
+        source: str = "calibrate",
+    ) -> int:
+        now_str = iso()
+        with self._tx() as conn:
+            conn.execute(
                 "INSERT INTO calibrations(task_id, run_id, report_json, created_at)"
                 " VALUES (?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET"
                 " run_id = excluded.run_id, report_json = excluded.report_json,"
                 " created_at = excluded.created_at",
-                (task_id, run_id, report_json, iso()),
+                (task_id, run_id, report_json, now_str),
             )
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS v FROM calibration_history WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            next_version = int(row["v"]) + 1 if row else 1
+            conn.execute(
+                "INSERT INTO calibration_history("
+                " task_id, version, run_id, report_json, spec_json, source, created_at"
+                ") VALUES (?,?,?,?,?,?,?)",
+                (task_id, next_version, run_id, report_json, spec_json, source, now_str),
+            )
+        return next_version
 
     def get_calibration(self, task_id: str) -> str | None:
         row = self._one("SELECT report_json FROM calibrations WHERE task_id = ?", (task_id,))
         return row["report_json"] if row else None
+
+    def list_calibration_history(self, task_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT version, run_id, report_json, spec_json, source, created_at"
+            " FROM calibration_history WHERE task_id = ? ORDER BY version DESC LIMIT ?",
+            (task_id, limit),
+        )
+        return [dict(row) for row in rows]
+
+    def get_calibration_entry(self, task_id: str, version: int) -> dict[str, Any] | None:
+        row = self._one(
+            "SELECT version, run_id, report_json, spec_json, source, created_at"
+            " FROM calibration_history WHERE task_id = ? AND version = ?",
+            (task_id, version),
+        )
+        return dict(row) if row else None
 
     # -- datasets ---------------------------------------------------------
     def dataset(self, dataset_id: str) -> DatasetInfo | None:
@@ -830,6 +895,14 @@ class OperationalStore:
                 " WHERE domain = ? AND signature = ?",
                 (iso(), domain, signature),
             )
+
+    def delete_selector(self, domain: str, signature: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM selector_cache WHERE domain = ? AND signature = ?",
+                (domain, signature),
+            )
+        return cur.rowcount > 0
 
     # -- raw page index ---------------------------------------------------
     def remember_page(self, url: str, content_hash: str, status: int, size: int, engine: str) -> None:

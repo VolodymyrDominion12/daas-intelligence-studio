@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/pipeline/planner.py`, `backend/app/presets.py`, `backend/app/discovery.py`, `backend/app/llm/prompts.py` (`PLANNER_SYSTEM`), `backend/app/runtime.py` (`Studio.create_task`, `update_task`) |
-| **API** | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `PATCH /api/tasks/{id}/limits`, `POST/DELETE /api/tasks/{id}/columns[/{key}]`, `DELETE /api/tasks/{id}` |
+| **Код** | `backend/app/pipeline/planner.py`, `backend/app/presets.py`, `backend/app/discovery.py`, `backend/app/llm/prompts.py` (`PLANNER_SYSTEM`), `backend/app/runtime.py` (`Studio.create_task`, `update_task`, `update_column`, `reorder_columns`) |
+| **API** | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `PATCH /api/tasks/{id}/limits`, `POST/PATCH/DELETE /api/tasks/{id}/columns[/{key}]`, `POST /api/tasks/{id}/columns/reorder`, `DELETE /api/tasks/{id}` |
 | **CLI** | `daas task create --prompt … --seed … [--api-source …]`, `daas task list`, `daas task show` |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_metrics_and_spend.py` |
-| **Джерела** | `docs/01` модуль 1, `docs/03` §2 |
-| **Статус** | as-built (P1-09) |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_metrics_and_spend.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/01` модуль 1, `docs/03` §2, `docs/03` §3.7 (`P1-10`) |
+| **Статус** | as-built (P1-10) |
 
 ## 1. Призначення
 Перетворити бізнес-запит природною мовою і 0–20 seed-URL на валідний `TaskSpec`: колонки з типом,
@@ -118,6 +118,16 @@ LLM) і `plan_ready` (`data.spec`).
 `GET /api/tasks/{id}`. Якщо створення задачі провалюється до збереження, виклик лишається в журналі
 під унікальним plan-ідентифікатором запуску без присвоєння чужого `task_id`.
 - **Перевірка:** `tests/test_metrics_and_spend.py::test_plan_spend_attributed_to_created_task`
+
+### REQ-PLAN-014 — Редагування, перестановка колонок і ручні CSS-селектори в `TaskSpec`
+Система **ПОВИННА** дозволяти змінювати набір колонок задачі через типізований контракт:
+- додавати колонки будь-якого підтримуваного методу (`css`, `json_ld`, `regex`, `llm`, `enrichment`, `manual`, `api_json`), автоматично прив'язуючи збагачувач `site_audit` за потреби;
+- оновлювати параметри наявної колонки (`title`, `dtype`, `description`, `required`, `pii`, `method`, `aliases`, `selector`, `attr`, `prompt`) із записом події `column_updated`;
+- переставляти порядок колонок задачі із збереженням унікальності та повноти набору ключів і записом події `columns_reordered`;
+- валідувати синтаксис непорожнього ручного CSS-селектора до збереження (як при створенні/оновленні колонки, так і при оновленні всього `spec`).
+- **Сценарій:** GIVEN задача зі списком колонок `[name, city, phone]` WHEN користувач змінює заголовок `phone` на «Гаряча лінія», тип на `phone`, задає ручний селектор `.clinic-card__phone` і переставляє порядок колонок THEN оновлена спека зберігається, новий порядок фіксується, а в журналі з'являються події `column_updated` і `columns_reordered`.
+- **Відмова:** GIVEN синтаксично невалідний CSS-селектор (наприклад `div[[broken`) або дублікат/відсутній ключ під час перестановки WHEN надсилається запит оновлення/перестановки THEN система відхиляє зміну з HTTP `400`/`422` і зрозумілим повідомленням українською без пошкодження збереженої спеки.
+- **Перевірка:** `tests/test_spec_editor_and_diff.py::test_column_update_reorder_and_selector_validation`
 
 ## 4. Інваріанти
 - План завжди валідний `TaskSpec` (≥ 1 колонка, унікальні ключі) — інакше задача не створюється.

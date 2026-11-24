@@ -591,6 +591,24 @@ export function SourcesPanel({ onToast }: { onToast: (toast: ToastMessage) => vo
               <span className="chip">
                 Доменів на моніторингу: {resilience.circuits.length}
               </span>
+              {resilience.js_renderer && (
+                <>
+                  <span className="chip">
+                    JS-рендер: {resilience.js_renderer.mode} ({resilience.js_renderer.active_engine})
+                  </span>
+                  <span className="chip">
+                    {resilience.js_renderer.sidecar_configured
+                      ? `Сайдкар: ${resilience.js_renderer.sidecar_url}`
+                      : resilience.js_renderer.local_playwright
+                        ? 'Локальний Playwright'
+                        : 'Сайдкар вимкнено'}
+                  </span>
+                  <span className="chip">
+                    JS рендери: ok {resilience.js_renderer.rendered_ok} / fallback{' '}
+                    {resilience.js_renderer.fallbacks} / помилки {resilience.js_renderer.errors}
+                  </span>
+                </>
+              )}
             </div>
 
             {resilience.proxies.length === 0 ? (

@@ -33,6 +33,21 @@ class Provenance(BaseModel):
     note: str | None = None
 
 
+def validate_css_selector(selector: str | None) -> str | None:
+    if selector is None:
+        return None
+    cleaned = selector.strip()
+    if not cleaned:
+        return None
+    from selectolax.lexbor import LexborHTMLParser
+
+    try:
+        LexborHTMLParser("<div></div>").css(cleaned)
+    except Exception as exc:  # noqa: BLE001 - selectolax raises runtime/value errors on bad syntax
+        raise ValueError(f"Невалідний CSS-селектор «{cleaned}»: {exc}") from exc
+    return cleaned
+
+
 class FieldSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -56,6 +71,19 @@ class FieldSpec(BaseModel):
         if not _KEY_RE.match(normalized):
             raise ValueError("key must be snake_case starting with a letter (2-41 chars)")
         return normalized
+
+    @field_validator("selector")
+    @classmethod
+    def _valid_selector(cls, value: str | None) -> str | None:
+        return validate_css_selector(value)
+
+    @field_validator("attr")
+    @classmethod
+    def _clean_attr(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @property
     def is_ai(self) -> bool:
@@ -281,6 +309,59 @@ class CalibrationReport(BaseModel):
     estimated_llm_cost_usd: float = 0.0
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class SchemaFieldDiff(BaseModel):
+    key: str
+    selector_before: str | None = None
+    selector_after: str | None = None
+    attr_before: str | None = None
+    attr_after: str | None = None
+    dtype_before: DType | None = None
+    dtype_after: DType | None = None
+    confidence_before: float | None = None
+    confidence_after: float | None = None
+    coverage_before: float | None = None
+    coverage_after: float | None = None
+
+
+class SchemaDiffReport(BaseModel):
+    current_version: int
+    previous_version: int | None = None
+    has_previous: bool = False
+    has_changes: bool = False
+    strategy_before: str | None = None
+    strategy_after: str = "none"
+    container_before: str | None = None
+    container_after: str | None = None
+    container_changed: bool = False
+    item_scope_before: bool | None = None
+    item_scope_after: bool | None = None
+    score_before: float | None = None
+    score_after: float | None = None
+    score_delta: float | None = None
+    records_before: int | None = None
+    records_after: int = 0
+    records_delta: int | None = None
+    fields_added: list[CssField] = Field(default_factory=list)
+    fields_removed: list[CssField] = Field(default_factory=list)
+    fields_changed: list[SchemaFieldDiff] = Field(default_factory=list)
+    coverage_deltas: dict[str, float] = Field(default_factory=dict)
+
+
+class CalibrationHistoryEntry(BaseModel):
+    version: int
+    run_id: str | None = None
+    source: str = "calibrate"
+    strategy: str = "none"
+    container: str | None = None
+    item_scope: bool | None = None
+    score: float = 0.0
+    records_found: int = 0
+    pages_ok: int = 0
+    pages_tried: int = 0
+    fields_count: int = 0
+    created_at: datetime
 
 
 class RunStats(BaseModel):

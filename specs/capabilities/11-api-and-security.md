@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built (P1-06) |
+| **Статус** | as-built (P1-10) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -17,13 +17,15 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 |:---|:---|:---|:---|
 | GET | `/api/health` | стан, версія, `llm_ready` (публічний) | 11 |
 | GET | `/api/metrics` | Prometheus metrics (`text/plain; version=0.0.4`, Bearer auth) | 11 |
-| GET | `/api/config` | capabilities, overview, enrichers | 11 |
+| GET | `/api/config` | capabilities (включно з `js_renderer`), overview, enrichers | 11 |
 | GET/POST | `/api/tasks` | список / створити (201) | 01 |
-| GET/PATCH/DELETE | `/api/tasks/{id}` | деталі (калібрування, датасет, запуски, активний запуск, `quarantine_count`, `spend_usd`) / оновити / видалити | 01 |
+| GET/PATCH/DELETE | `/api/tasks/{id}` | деталі (`calibration`, `calibration_version`, `calibration_history`, `calibration_diff`, датасет, запуски, активний запуск, `quarantine_count`, `spend_usd`) / оновити / видалити | 01 |
 | PATCH | `/api/tasks/{id}/limits` | ліміти | 01 |
-| POST/DELETE | `/api/tasks/{id}/columns[/{key}]` | колонки | 01 |
+| POST/PATCH/DELETE | `/api/tasks/{id}/columns[/{key}]` | додавання, редагування та видалення колонок | 01 |
+| POST | `/api/tasks/{id}/columns/reorder` | перестановка порядку колонок | 01 |
 | POST | `/api/tasks/{id}/calibrate` | калібрування (query: `force`, `acknowledge_high_risk`, `reason`) | 02, 06 |
-| GET | `/api/tasks/{id}/calibration` | звіт калібрування | 02 |
+| GET | `/api/tasks/{id}/calibration` | звіт калібрування, активна версія, історія та Schema Diff | 02 |
+| POST | `/api/tasks/{id}/calibration/rollback` | відкат активної схеми калібрування (`RollbackCalibrationRequest`) | 02 |
 | POST | `/api/tasks/{id}/run` | збір (`RunRequest`) | 04, 06 |
 | POST | `/api/tasks/{id}/enrich` | збагачення | 07 |
 | POST | `/api/tasks/{id}/snapshot` | снапшот + diff | 08 |
@@ -46,7 +48,7 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | POST/GET | `/api/tasks/{id}/exports`, `/api/exports`, `/api/exports/{file}` | експорт | 09 |
 | GET | `/api/dashboard` | огляд задач | 11 |
 | GET/PUT | `/api/sources[/{domain}]` | реєстр джерел (`tos_risk`, `license`, `fallback_urls`, `notes`) | 06, 05 |
-| GET | `/api/resilience` | статус пулу проксі (без секретів) і domain circuit breakers | 05, 11 |
+| GET | `/api/resilience` | статус пулу проксі (без секретів), domain circuit breakers і `js_renderer` | 05, 11 |
 | POST | `/api/resilience/circuits/{domain}/reset` | ручне скидання паузи circuit breaker домену (`circuit_reset`) | 05, 11 |
 | POST | `/api/maintenance/backup`, `/api/maintenance/purge-cache` | обслуговування | 12, 05 |
 
@@ -141,6 +143,21 @@ LLM (REQ-LLM-003).
 - `GET /api/metrics` — експорт Prometheus-метрик (`daas_proxy_pool_size`, `daas_proxy_healthy`, `daas_proxy_bytes_total`, `daas_proxy_cost_usd_total`, `daas_circuit_open_domains`, `daas_blocked_total{reason="circuit_open"}`);
 - CLI команди `daas proxy-status` та `daas circuit-reset <domain>`.
 - **Перевірка:** `tests/test_proxy_resilience.py::test_resilience_api_metrics_validation_and_cli`
+
+### REQ-API-012 — Спостережуваність JS-рендера в API, Prometheus `/api/metrics`, `daas doctor` та UI
+Система **ПОВИННА**:
+- відображати конфігурацію та статистику JS-рендерингу (`mode`, `active_engine`, `sidecar_configured`, редагований `sidecar_url` без паролів, `local_playwright`, `escalations`, `rendered_ok`, `fallbacks`, `errors`) у `GET /api/config` (`capabilities.js_renderer`), `GET /api/resilience` (`js_renderer`) та у виводі `daas doctor`;
+- експортувати у `GET /api/metrics` Prometheus-лічильники `daas_js_renders_total{result="ok"}`, `daas_js_renders_total{result="fallback"}`, `daas_js_renders_total{result="error"}`;
+- підтримувати синхронні типізовані контракти фронтенду (`types.ts`) та індикацію в `SourcesPanel`.
+- **Перевірка:** `tests/test_js_sidecar.py::test_js_api_metrics_doctor_and_sidecar_deploy`
+
+### REQ-API-013 — HTTP API для редактора spec, історії калібрувань, Schema Diff і відкату
+Система **ПОВИННА** надавати захищені Bearer-токеном ендпоінти:
+- `PATCH /api/tasks/{id}/columns/{key}` — оновлення метаданих, типу, PII, методу та ручного селектора/атрибута колонки (`200`, `404` для відсутньої задачі або колонки, `400`/`422` при невалідних параметрах);
+- `POST /api/tasks/{id}/columns/reorder` — зміна порядку колонок задачі за переліком ключів (`200`, `400` якщо набір ключів не збігається з колонками задачі);
+- `GET /api/tasks/{id}/calibration` та `GET /api/tasks/{id}` — повернення активного `calibration`, `calibration_version`, списку `calibration_history` (без громіздких сирих HTML) та обчисленого `calibration_diff` (`diff` у відповіді `/calibration`);
+- `POST /api/tasks/{id}/calibration/rollback` — відкат активної схеми калібрування до попередньої або вказаної версії (`200`, `400` коли немає попередньої версії, `404` коли версію не знайдено, `409` при активному запуску).
+- **Перевірка:** `tests/test_spec_editor_and_diff.py::test_spec_editor_and_diff_api_contracts`
 
 ## 4. Відкриті питання
 - `ValueError` зі сховища (невалідний `f_<key>`, див. 08) не мапиться → 500. Додати глобальний

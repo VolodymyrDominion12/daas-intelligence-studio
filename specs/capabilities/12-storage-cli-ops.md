@@ -2,16 +2,16 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/README.md` |
-| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py`, `tests/test_proxy_resilience.py` |
+| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/playwright-sidecar/Dockerfile`, `deploy/playwright-sidecar/server.py`, `deploy/README.md` |
+| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
 | **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), `docs/05` §5 Тиждень 3, ADR-02 |
-| **Статус** | as-built (`010-p1-06-proxy-circuit-breaker`) |
+| **Статус** | as-built (`012-p1-10-spec-editor-schema-diff`) |
 
 ## 1. Розкладка сховища
 
 ```text
 <DAAS_STORAGE_DIR, за замовчуванням <repo>/storage>/
-├── operational.sqlite      # tasks, runs, jobs, events, ledger, registry, calibrations, misses, api_state, schedules, subscriptions, delivery_log
+├── operational.sqlite      # tasks, runs, jobs, events, ledger, registry, calibrations, calibration_history, misses, api_state, schedules, subscriptions, delivery_log, entity_links
 ├── analytics.duckdb        # record_versions, quarantine, current_records
 ├── raw_cache/<xx>/<sha256>.json.zst
 ├── snapshots/dataset=<slug>/version=<NNNN>/{part.parquet, manifest.json}
@@ -32,7 +32,8 @@
 `DAAS_DELIVERY_MAX_RETRIES`, `DAAS_QUALITY_MAX_DROP_RATIO`, `DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`,
 `DAAS_EVAL_MIN_F1`, `DAAS_PROXY_URLS`, `DAAS_PROXY_STRATEGY`, `DAAS_PROXY_STICKY_TTL_S`,
 `DAAS_PROXY_COOLDOWN_S`, `DAAS_PROXY_COST_PER_GB_USD`, `DAAS_CIRCUIT_BREAKER_THRESHOLD`,
-`DAAS_CIRCUIT_BREAKER_COOLDOWN_S`). Відносний `storage_dir` — відносно кореня репо.
+`DAAS_CIRCUIT_BREAKER_COOLDOWN_S`, `DAAS_PLAYWRIGHT_SIDECAR_URL`, `DAAS_PLAYWRIGHT_WAIT_UNTIL`,
+`DAAS_PLAYWRIGHT_WAIT_MS`, `DAAS_JS_MIN_TEXT_CHARS`). Відносний `storage_dir` — відносно кореня репо.
 - **Перевірка:** — (прогалина)
 
 ### REQ-OPS-002 — Офлайн-режим
@@ -43,13 +44,15 @@
 ## 3. Вимоги — SQLite
 
 ### REQ-OPS-010 — Forward-only міграції
-`OperationalStore` **ПОВИНЕН** працювати в WAL і застосовувати `MIGRATIONS` (1–6) по порядку
+`OperationalStore` **ПОВИНЕН** працювати в WAL і застосовувати `MIGRATIONS` (1–8) по порядку
 один раз; нова таблиця/колонка — лише новою міграцією з наступним номером, ніколи не редагуванням
-старої.
+старої. Міграція v8 додає таблицю історії калібрувань `calibration_history` і переносить туди
+наявні записи `calibrations` як `version = 1` без втрати даних старих БД.
 - **Перевірка:** `tests/test_storage.py::test_queue_lease_retry_and_cancel`,
   `tests/test_open_api_source.py::test_sqlite_migration_v4_opens_v3_database`,
   `tests/test_scheduler.py::test_sqlite_migration_v5_opens_v4_database`,
-  `tests/test_delivery.py::test_sqlite_migration_v6_opens_v5_database`
+  `tests/test_delivery.py::test_sqlite_migration_v6_opens_v5_database`,
+  `tests/test_spec_editor_and_diff.py::test_sqlite_migration_v8_opens_v7_and_preserves_calibration`
 
 ## 4. Вимоги — бекап
 
@@ -88,8 +91,9 @@
 
 ### REQ-OPS-032 — doctor
 `daas doctor` **ПОВИНЕН** виводити JSON із перевірками: сховище доступне на запис, SQLite, DuckDB,
-статистика кешу, `llm_ready`, пошук, чи зібрано фронтенд.
-- **Перевірка:** — (прогалина)
+статистика кешу, `llm_ready`, пошук, стан JS-рендера/сайдкара (`js_renderer` без паролів і без
+мережевих запитів у `offline=true`), чи зібрано фронтенд.
+- **Перевірка:** `tests/test_js_sidecar.py::test_js_api_metrics_doctor_and_sidecar_deploy`
 
 ## 6. Вимоги — демо
 
@@ -117,9 +121,11 @@ CI **ПОВИНЕН** на кожен push/PR запускати: backend — `u
 
 ### REQ-OPS-060 — Контейнерне складання та production Compose для VPS
 Репозиторій **ПОВИНЕН** містити `.dockerignore`, багатоетапний `Dockerfile` (збірка `frontend/dist` +
-Python 3.12 `uv` + `daas serve` + `HEALTHCHECK /api/health`) та `docker-compose.prod.yml` із
-прив'язкою порту лише до `127.0.0.1` та постійним томом `./storage:/app/storage`.
-- **Перевірка:** `tests/test_deploy_ops.py::test_docker_and_compose_configs_are_valid`
+Python 3.12 `uv` + `daas serve` + `HEALTHCHECK /api/health`), `docker-compose.prod.yml` із
+прив'язкою порту лише до `127.0.0.1` та постійним томом `./storage:/app/storage`, а також опційний
+ізольований сервіс `playwright-sidecar` (`deploy/playwright-sidecar/`) під профілем `playwright`.
+- **Перевірка:** `tests/test_deploy_ops.py::test_docker_and_compose_configs_are_valid`,
+  `tests/test_js_sidecar.py::test_js_api_metrics_doctor_and_sidecar_deploy`
 
 ### REQ-OPS-061 — Шаблони VPS (`systemd`, reverse proxy) та скрипт щоденного бекапу
 `deploy/` **ПОВИНЕН** містити `systemd`-юніт, `Caddyfile` для HTTPS-проксі, документацію

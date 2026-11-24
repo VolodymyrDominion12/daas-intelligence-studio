@@ -10,12 +10,16 @@ from ..models import (
     ApiSourceSpec,
     DeliveryChannel,
     DeliveryFilters,
+    DType,
     FieldSpec,
     Limits,
     MergePolicy,
+    Method,
+    PiiClass,
     SourcePolicy,
     SubscriptionInfo,
     TaskSpec,
+    validate_css_selector,
 )
 from ..pipeline.scheduler import validate_cron
 
@@ -103,6 +107,32 @@ class EnrichRequest(BaseModel):
 
 class AddColumnRequest(BaseModel):
     field: FieldSpec
+
+
+class UpdateColumnRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    dtype: DType | None = None
+    description: str | None = Field(default=None, max_length=500)
+    required: bool | None = None
+    pii: PiiClass | None = None
+    method: Method | None = None
+    aliases: list[str] | None = Field(default=None, max_length=50)
+    selector: str | None = Field(default=None, max_length=500)
+    attr: str | None = Field(default=None, max_length=120)
+    prompt: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("selector")
+    @classmethod
+    def _valid_selector(cls, value: str | None) -> str | None:
+        return validate_css_selector(value)
+
+
+class ReorderColumnsRequest(BaseModel):
+    keys: list[str] = Field(min_length=1, max_length=100)
+
+
+class RollbackCalibrationRequest(BaseModel):
+    version: int | None = Field(default=None, ge=1)
 
 
 class LimitsRequest(BaseModel):

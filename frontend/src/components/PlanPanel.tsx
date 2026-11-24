@@ -11,15 +11,94 @@ interface Props {
   onToast: (toast: ToastMessage) => void
 }
 
-const DTYPES = ['string', 'number', 'integer', 'boolean', 'url', 'email', 'phone', 'datetime', 'array']
+const DTYPES: FieldSpec['dtype'][] = [
+  'string',
+  'number',
+  'integer',
+  'boolean',
+  'url',
+  'email',
+  'phone',
+  'datetime',
+  'array',
+  'json',
+]
+
+const METHODS: { value: FieldSpec['method']; label: string }[] = [
+  { value: 'css', label: 'css (селектор / авто)' },
+  { value: 'llm', label: 'llm (AI-колонка)' },
+  { value: 'enrichment', label: 'enrichment (збагачення)' },
+  { value: 'regex', label: 'regex' },
+  { value: 'json_ld', label: 'json_ld' },
+  { value: 'manual', label: 'manual' },
+  { value: 'api_json', label: 'api_json' },
+]
+
+const PII_OPTIONS: { value: FieldSpec['pii']; label: string }[] = [
+  { value: 'none', label: 'немає' },
+  { value: 'business_contact', label: 'бізнес-контакт' },
+  { value: 'personal', label: 'персональні (PII)' },
+]
+
+interface ColumnDraft {
+  key: string
+  title: string
+  dtype: FieldSpec['dtype']
+  method: FieldSpec['method']
+  pii: FieldSpec['pii']
+  required: boolean
+  selector: string
+  attr: string
+  prompt: string
+  description: string
+  aliases: string
+}
+
+const emptyDraft = (method: FieldSpec['method'] = 'css'): ColumnDraft => ({
+  key: '',
+  title: '',
+  dtype: 'string',
+  method,
+  pii: 'none',
+  required: false,
+  selector: '',
+  attr: '',
+  prompt: '',
+  description: '',
+  aliases: '',
+})
+
+const draftFromField = (field: FieldSpec): ColumnDraft => ({
+  key: field.key,
+  title: field.title,
+  dtype: field.dtype,
+  method: field.method,
+  pii: field.pii,
+  required: field.required,
+  selector: field.selector ?? '',
+  attr: field.attr ?? '',
+  prompt: field.prompt ?? '',
+  description: field.description ?? '',
+  aliases: field.aliases.join(', '),
+})
+
+const slugKey = (title: string): string => {
+  const cleaned = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 30)
+  return /^[a-z][a-z0-9_]{1,}$/.test(cleaned)
+    ? cleaned
+    : `col_${Date.now().toString(36).slice(-5)}`
+}
 
 export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Props) {
   const spec = task.spec
-  const [showAiForm, setShowAiForm] = useState(false)
-  const [aiTitle, setAiTitle] = useState('')
-  const [aiKey, setAiKey] = useState('')
-  const [aiPrompt, setAiPrompt] = useState('')
-  const [aiDtype, setAiDtype] = useState('string')
+  const [showAddForm, setShowAddForm] = useState(false)
+  const [addDraft, setAddDraft] = useState<ColumnDraft>(() => emptyDraft('css'))
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<ColumnDraft | null>(null)
   const [busy, setBusy] = useState(false)
   const [seedsDraft, setSeedsDraft] = useState(spec.seeds.join('\n'))
   const [limits, setLimits] = useState({ ...spec.limits })
@@ -38,41 +117,109 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
     }
   }
 
-  const addAiColumn = async () => {
-    const title = aiTitle.trim()
-    if (!title || !aiPrompt.trim()) {
-      onToast({ kind: 'error', text: 'Заповніть назву та промпт колонки' })
+  const openAddForm = (method: FieldSpec['method']) => {
+    setAddDraft(emptyDraft(method))
+    setShowAddForm(true)
+    setEditingKey(null)
+    setEditDraft(null)
+  }
+
+  const addColumn = async () => {
+    const title = addDraft.title.trim()
+    if (!title) {
+      onToast({ kind: 'error', text: 'Вкажіть назву колонки' })
       return
     }
-    const key =
-      aiKey.trim() ||
-      title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '_')
-        .replace(/^_+|_+$/g, '')
-        .slice(0, 30) ||
-      `ai_${Date.now().toString(36).slice(-5)}`
+    if (addDraft.method === 'llm' && !addDraft.prompt.trim()) {
+      onToast({ kind: 'error', text: 'Для AI-колонки потрібен промпт' })
+      return
+    }
+    const key = addDraft.key.trim() || slugKey(title)
+    const aliases = addDraft.aliases
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
     const field: Partial<FieldSpec> = {
       key,
       title,
-      dtype: aiDtype as FieldSpec['dtype'],
-      method: 'llm',
-      pii: 'none',
-      prompt: aiPrompt.trim(),
-      description: aiPrompt.trim(),
-      aliases: [],
+      dtype: addDraft.dtype,
+      method: addDraft.method,
+      pii: addDraft.pii,
+      required: addDraft.required,
+      selector: addDraft.selector.trim() || null,
+      attr: addDraft.attr.trim() || null,
+      prompt: addDraft.prompt.trim() || null,
+      description: (addDraft.description || addDraft.prompt).trim(),
+      aliases,
     }
     await run(async () => {
       await api.addColumn(task.id, field)
-      setAiTitle('')
-      setAiKey('')
-      setAiPrompt('')
-      setShowAiForm(false)
-    }, `AI-колонку «${title}» додано`)
+      setAddDraft(emptyDraft('css'))
+      setShowAddForm(false)
+    }, `Колонку «${title}» додано`)
+  }
+
+  const startEdit = (column: FieldSpec) => {
+    if (editingKey === column.key) {
+      setEditingKey(null)
+      setEditDraft(null)
+      return
+    }
+    setShowAddForm(false)
+    setEditingKey(column.key)
+    setEditDraft(draftFromField(column))
+  }
+
+  const saveEdit = async () => {
+    if (!editingKey || !editDraft) return
+    const title = editDraft.title.trim()
+    if (!title) {
+      onToast({ kind: 'error', text: 'Назва колонки не може бути порожньою' })
+      return
+    }
+    if (editDraft.method === 'llm' && !editDraft.prompt.trim()) {
+      onToast({ kind: 'error', text: 'Для методу llm потрібен промпт' })
+      return
+    }
+    const aliases = editDraft.aliases
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    await run(async () => {
+      await api.updateColumn(task.id, editingKey, {
+        title,
+        dtype: editDraft.dtype,
+        method: editDraft.method,
+        pii: editDraft.pii,
+        required: editDraft.required,
+        selector: editDraft.selector.trim() || null,
+        attr: editDraft.attr.trim() || null,
+        prompt: editDraft.prompt.trim() || null,
+        description: editDraft.description.trim(),
+        aliases,
+      })
+      setEditingKey(null)
+      setEditDraft(null)
+    }, `Колонку «${title}» оновлено`)
+  }
+
+  const moveColumn = (index: number, delta: -1 | 1) => {
+    const target = index + delta
+    if (target < 0 || target >= spec.columns.length) return
+    const keys = spec.columns.map((column) => column.key)
+    const [moved] = keys.splice(index, 1)
+    keys.splice(target, 0, moved)
+    void run(() => api.reorderColumns(task.id, keys), 'Порядок колонок оновлено')
   }
 
   const deleteColumn = (key: string) => {
-    void run(() => api.deleteColumn(task.id, key), `Колонку ${key} видалено`)
+    void run(async () => {
+      await api.deleteColumn(task.id, key)
+      if (editingKey === key) {
+        setEditingKey(null)
+        setEditDraft(null)
+      }
+    }, `Колонку ${key} видалено`)
   }
 
   const saveSeeds = () =>
@@ -146,39 +293,49 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
 
       <section className="card">
         <div className="card-head">
-          <h3 className="card-title">Колонки датасету</h3>
-          <button className="btn btn--ghost" onClick={() => setShowAiForm((value) => !value)}>
-            + AI-колонка
-          </button>
+          <h3 className="card-title">Колонки датасету (Spec Editor)</h3>
+          <div className="card-actions">
+            <button
+              className="btn btn--ghost"
+              onClick={() => (showAddForm ? setShowAddForm(false) : openAddForm('css'))}
+            >
+              + Додати колонку
+            </button>
+            <button className="btn btn--ghost" onClick={() => openAddForm('llm')}>
+              + AI-колонка
+            </button>
+          </div>
         </div>
 
-        {showAiForm && (
+        {showAddForm && (
           <div className="ai-form">
             <div className="form-row">
               <label className="field">
                 <span className="field-label">Назва колонки</span>
                 <input
                   className="input"
-                  value={aiTitle}
-                  onChange={(event) => setAiTitle(event.target.value)}
-                  placeholder="Оцінка болю"
+                  value={addDraft.title}
+                  onChange={(event) => setAddDraft({ ...addDraft, title: event.target.value })}
+                  placeholder="Напр. Тариф або Оцінка болю"
                 />
               </label>
               <label className="field">
                 <span className="field-label">Ключ (snake_case)</span>
                 <input
                   className="input mono"
-                  value={aiKey}
-                  onChange={(event) => setAiKey(event.target.value)}
-                  placeholder="pain_score"
+                  value={addDraft.key}
+                  onChange={(event) => setAddDraft({ ...addDraft, key: event.target.value })}
+                  placeholder="tier_badge"
                 />
               </label>
               <label className="field field--small">
                 <span className="field-label">Тип</span>
                 <select
                   className="select"
-                  value={aiDtype}
-                  onChange={(event) => setAiDtype(event.target.value)}
+                  value={addDraft.dtype}
+                  onChange={(event) =>
+                    setAddDraft({ ...addDraft, dtype: event.target.value as FieldSpec['dtype'] })
+                  }
                 >
                   {DTYPES.map((dtype) => (
                     <option key={dtype} value={dtype}>
@@ -187,26 +344,250 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
                   ))}
                 </select>
               </label>
+              <label className="field">
+                <span className="field-label">Метод</span>
+                <select
+                  className="select"
+                  value={addDraft.method}
+                  onChange={(event) =>
+                    setAddDraft({ ...addDraft, method: event.target.value as FieldSpec['method'] })
+                  }
+                >
+                  {METHODS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">PII</span>
+                <select
+                  className="select"
+                  value={addDraft.pii}
+                  onChange={(event) =>
+                    setAddDraft({ ...addDraft, pii: event.target.value as FieldSpec['pii'] })
+                  }
+                >
+                  {PII_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-            <label className="field">
-              <span className="field-label">
-                Промпт для кожного рядка
-                <span className="hint">модель не отримує персональні дані</span>
-              </span>
-              <textarea
-                className="textarea"
-                rows={2}
-                value={aiPrompt}
-                onChange={(event) => setAiPrompt(event.target.value)}
-                placeholder="Оціни 0-100, наскільки компанія потребує наших послуг. Поясни одним реченням."
-              />
-            </label>
+
+            {addDraft.method !== 'llm' && (
+              <div className="form-row">
+                <label className="field">
+                  <span className="field-label">Ручний CSS-селектор (опціонально)</span>
+                  <input
+                    className="input mono"
+                    value={addDraft.selector}
+                    onChange={(event) => setAddDraft({ ...addDraft, selector: event.target.value })}
+                    placeholder=".clinic-card__badge або a.website"
+                  />
+                </label>
+                <label className="field field--small">
+                  <span className="field-label">Атрибут (опціонально)</span>
+                  <input
+                    className="input mono"
+                    value={addDraft.attr}
+                    onChange={(event) => setAddDraft({ ...addDraft, attr: event.target.value })}
+                    placeholder="href, data-tier"
+                  />
+                </label>
+              </div>
+            )}
+
+            {addDraft.method === 'llm' && (
+              <label className="field">
+                <span className="field-label">
+                  Промпт для кожного рядка
+                  <span className="hint">модель не отримує персональні дані</span>
+                </span>
+                <textarea
+                  className="textarea"
+                  rows={2}
+                  value={addDraft.prompt}
+                  onChange={(event) => setAddDraft({ ...addDraft, prompt: event.target.value })}
+                  placeholder="Оціни 0-100, наскільки компанія потребує наших послуг. Поясни одним реченням."
+                />
+              </label>
+            )}
+
+            <div className="form-row form-row--baseline">
+              <label className="checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={addDraft.required}
+                  onChange={(event) => setAddDraft({ ...addDraft, required: event.target.checked })}
+                />
+                <span>Обовʼязкова колонка</span>
+              </label>
+              <label className="field">
+                <span className="field-label">Синоніми / аліаси (через кому)</span>
+                <input
+                  className="input"
+                  value={addDraft.aliases}
+                  onChange={(event) => setAddDraft({ ...addDraft, aliases: event.target.value })}
+                  placeholder="тариф, план"
+                />
+              </label>
+            </div>
+
             <div className="form-actions">
-              <button className="btn btn--primary" onClick={addAiColumn} disabled={busy}>
+              <button className="btn btn--primary" onClick={addColumn} disabled={busy}>
                 Додати
               </button>
-              <button className="btn" onClick={() => setShowAiForm(false)}>
+              <button className="btn" onClick={() => setShowAddForm(false)}>
                 Закрити
+              </button>
+            </div>
+          </div>
+        )}
+
+        {editingKey && editDraft && (
+          <div className="ai-form column-editor">
+            <div className="card-head">
+              <strong className="mono-small">Редагування колонки: {editingKey}</strong>
+              <button
+                className="tiny-btn"
+                onClick={() => {
+                  setEditingKey(null)
+                  setEditDraft(null)
+                }}
+              >
+                закрити
+              </button>
+            </div>
+            <div className="form-row">
+              <label className="field">
+                <span className="field-label">Назва</span>
+                <input
+                  className="input"
+                  value={editDraft.title}
+                  onChange={(event) => setEditDraft({ ...editDraft, title: event.target.value })}
+                />
+              </label>
+              <label className="field field--small">
+                <span className="field-label">Тип</span>
+                <select
+                  className="select"
+                  value={editDraft.dtype}
+                  onChange={(event) =>
+                    setEditDraft({ ...editDraft, dtype: event.target.value as FieldSpec['dtype'] })
+                  }
+                >
+                  {DTYPES.map((dtype) => (
+                    <option key={dtype} value={dtype}>
+                      {dtype}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Метод</span>
+                <select
+                  className="select"
+                  value={editDraft.method}
+                  onChange={(event) =>
+                    setEditDraft({
+                      ...editDraft,
+                      method: event.target.value as FieldSpec['method'],
+                    })
+                  }
+                >
+                  {METHODS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">PII</span>
+                <select
+                  className="select"
+                  value={editDraft.pii}
+                  onChange={(event) =>
+                    setEditDraft({ ...editDraft, pii: event.target.value as FieldSpec['pii'] })
+                  }
+                >
+                  {PII_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="form-row">
+              <label className="field">
+                <span className="field-label">Ручний CSS-селектор</span>
+                <input
+                  className="input mono"
+                  value={editDraft.selector}
+                  onChange={(event) => setEditDraft({ ...editDraft, selector: event.target.value })}
+                  placeholder="Порожньо = автоматичний вибір"
+                />
+              </label>
+              <label className="field field--small">
+                <span className="field-label">Атрибут</span>
+                <input
+                  className="input mono"
+                  value={editDraft.attr}
+                  onChange={(event) => setEditDraft({ ...editDraft, attr: event.target.value })}
+                  placeholder="text (за замовч.)"
+                />
+              </label>
+            </div>
+
+            {editDraft.method === 'llm' && (
+              <label className="field">
+                <span className="field-label">Промпт</span>
+                <textarea
+                  className="textarea"
+                  rows={2}
+                  value={editDraft.prompt}
+                  onChange={(event) => setEditDraft({ ...editDraft, prompt: event.target.value })}
+                />
+              </label>
+            )}
+
+            <div className="form-row form-row--baseline">
+              <label className="checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={editDraft.required}
+                  onChange={(event) => setEditDraft({ ...editDraft, required: event.target.checked })}
+                />
+                <span>Обовʼязкова колонка</span>
+              </label>
+              <label className="field">
+                <span className="field-label">Аліаси (через кому)</span>
+                <input
+                  className="input"
+                  value={editDraft.aliases}
+                  onChange={(event) => setEditDraft({ ...editDraft, aliases: event.target.value })}
+                />
+              </label>
+            </div>
+
+            <div className="form-actions">
+              <button className="btn btn--primary" onClick={saveEdit} disabled={busy}>
+                Зберегти колонку
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  setEditingKey(null)
+                  setEditDraft(null)
+                }}
+              >
+                Скасувати
               </button>
             </div>
           </div>
@@ -225,13 +606,25 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
               </tr>
             </thead>
             <tbody>
-              {spec.columns.map((column) => {
+              {spec.columns.map((column, index) => {
                 const fill = quality[column.key]
+                const isEditing = editingKey === column.key
                 return (
-                  <tr key={column.key}>
+                  <tr key={column.key} className={isEditing ? 'row--editing' : undefined}>
                     <td>
-                      <div className="cell-title">{column.title}</div>
+                      <div className="cell-title">
+                        {column.title}{' '}
+                        {column.required && <span className="chip chip--yes">обовʼяз.</span>}
+                      </div>
                       <code className="mono-small">{column.key}</code>
+                      {column.selector && (
+                        <div className="selector-preview">
+                          <code className="selector selector--manual">
+                            {column.selector}
+                            {column.attr ? ` @${column.attr}` : ''}
+                          </code>
+                        </div>
+                      )}
                     </td>
                     <td>
                       <span className="chip">{column.dtype}</span>
@@ -256,15 +649,41 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
                         </span>
                       </div>
                     </td>
-                    <td className="td-actions">
-                      <button
-                        className="icon-btn icon-btn--danger"
-                        title="Видалити колонку"
-                        onClick={() => deleteColumn(column.key)}
-                        disabled={busy || spec.columns.length <= 1}
-                      >
-                        ✕
-                      </button>
+                    <td className="td-actions td-actions--wide">
+                      <div className="row-actions">
+                        <button
+                          className="icon-btn"
+                          title="Перемістити вище"
+                          onClick={() => moveColumn(index, -1)}
+                          disabled={busy || index === 0}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="icon-btn"
+                          title="Перемістити нижче"
+                          onClick={() => moveColumn(index, 1)}
+                          disabled={busy || index === spec.columns.length - 1}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          className="icon-btn"
+                          title="Редагувати колонку"
+                          onClick={() => startEdit(column)}
+                          disabled={busy}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          className="icon-btn icon-btn--danger"
+                          title="Видалити колонку"
+                          onClick={() => deleteColumn(column.key)}
+                          disabled={busy || spec.columns.length <= 1}
+                        >
+                          ✕
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

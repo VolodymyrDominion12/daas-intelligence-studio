@@ -3,16 +3,16 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
-| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py` |
-| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`) |
-| **Статус** | as-built (P1-06) |
+| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`), `docs/03` §3.4 (`P1-07`), `docs/03` §3.7 (`P1-10`) |
+| **Статус** | as-built (P1-10) |
 
 ## 1. Сутності
 
 | Сутність | Модель | Де живе | Призначення |
 |:---|:---|:---|:---|
 | Задача | `TaskInfo` + `TaskSpec` | SQLite `tasks.spec_json` | Що збираємо: колонки, seed-и, ліміти, збагачення |
-| Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання |
+| Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання, ручний CSS-селектор |
 | API-джерело | `ApiSourceSpec` | у `TaskSpec.api_source` | Декларативний мапінг JSON API, курсор, пагінація |
 | Розклад | `ScheduleInfo` | SQLite `schedules` | Cron-вираз (UTC), `catch_up`, `next_run_at`, останній запуск |
 | Підписка доставки | `SubscriptionInfo` + `DeliveryFilters` | SQLite `subscriptions` | Канал (`webhook`/`telegram`), ціль, фільтри дельти, алерти власнику |
@@ -24,6 +24,7 @@
 | Зв'язок сутностей | `EntityLinkInfo` | SQLite `entity_links` | Pairwise рішення (`merged`/`dismissed`/`unmerged`), політика, ревізії до злиття |
 | Схема селекторів | `CssSchema` | SQLite `selector_cache` | Результат калібрування на `domain + entity` |
 | Звіт калібрування | `CalibrationReport` | SQLite `calibrations` | Прев'ю, покриття, попередження |
+| Історія калібрувань і diff | `CalibrationHistoryEntry`, `SchemaDiffReport` | SQLite `calibration_history` | Версіоновані знімки калібрувань, порівняння версій та відкат схеми |
 | Політика джерела | `SourcePolicy` | SQLite `source_registry` | `tos_risk`, ліцензія, `fallback_urls`, нотатки |
 | Зміна | `ChangeEvent` | події + `snapshots/…/manifest.json` | `new_entity`, `removed_entity`, `field_changed`, `price_drop` |
 
@@ -104,6 +105,8 @@ Query-параметри в `seeds` зберігаються, коли зада�
 |:---|:---|:---|:---|
 | `task_created`, `plan_ready` | info | `runtime.Studio.create_task` | Створено задачу; `data.spec` — план |
 | `task_updated`, `column_added` | info | `api/tasks.py` | Редагування задачі/колонок |
+| `column_updated`, `columns_reordered` | info | `runtime.Studio` | Оновлення параметрів/селектора колонки або зміна порядку колонок |
+| `calibration_rolled_back` | info | `runtime.Studio` | Відкат схеми калібрування до попередньої версії (`from_version`, `to_version`, `new_version`) |
 | `schedule_updated`, `schedule_deleted` | info | `runtime.Studio` | Створення/оновлення/видалення cron-розкладу задачі |
 | `schedule_triggered` | info | `pipeline/scheduler.py` | Планувальник запустив плановий або доганяючий `collect` |
 | `schedule_skipped` | info | `pipeline/scheduler.py` | Пропуск слоту (`active_run` або `missed_no_catchup`) |
@@ -117,6 +120,7 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `page_extracted` | debug | runner | Сторінка дала записи |
 | `no_records` | warning/debug | runner | Сторінка без записів |
 | `fetch_failed`, `job_failed` | warning/error | runner | Відмова завантаження / виняток у задачі черги |
+| `js_rendered`, `js_render_fallback` | info/warning | `pipeline/calibration.py`, `pipeline/runner.py` | Автоматичний JS-рендер SPA-оболонки / безпечний HTTP fallback |
 | `circuit_opened`, `circuit_fallback` | warning/info | `pipeline/runner.py` | Домен перейшов у `open` після серії блоків / перемикання на fallback URL |
 | `circuit_reset` | info | `runtime.Studio` (`task_id="system"`) | Ручне скидання паузи circuit breaker домену |
 | `json_parse_failed` | warning | runner | Не вдалося розібрати JSON-відповідь API (`data.url`, `data.error`) |

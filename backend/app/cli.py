@@ -116,6 +116,12 @@ def doctor() -> None:
     try:
         asyncio.run(studio.router.probe(timeout=1.0))
         caps = studio.capabilities()
+        js_check = dict(caps.get("js_renderer") or {})
+        if studio.sidecar_client is not None and not settings.offline:
+            health = asyncio.run(studio.sidecar_client.health(timeout_s=1.0))
+            js_check["sidecar_healthy"] = health is not None
+        else:
+            js_check["sidecar_healthy"] = None
         checks = {
             "storage_writable": _writable(studio.paths.root),
             "sqlite": studio.store.overview() is not None,
@@ -123,6 +129,7 @@ def doctor() -> None:
             "raw_cache": studio.cache.stats(),
             "llm_ready": caps["llm_ready"],
             "search": caps["search_provider"],
+            "js_renderer": js_check,
             "frontend_built": (Path(__file__).resolve().parents[2] / "frontend" / "dist" / "index.html").exists(),
         }
         typer.echo(json.dumps({"version": __version__, "checks": checks, "capabilities": caps},

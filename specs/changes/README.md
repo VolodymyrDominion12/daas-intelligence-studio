@@ -13,7 +13,7 @@
 
 | # | Зміна | Беклог | Статус |
 |:---|:---|:---|:---|
-| — | _(активних змін немає)_ | — | — |
+| — | — | — | — |
 
 ## Архівовані зміни
 
@@ -29,3 +29,5 @@
 | 008 | [Атрибуція plan-витрат LLM та Prometheus `/api/metrics`](archive/008-p1-09-metrics-and-spend/spec.md) | `P1-09` | done |
 | 009 | [Entity Resolution v2: merge/unmerge дублікатів + UI-черга](archive/009-p1-02-entity-merge/spec.md) | `P1-02` | done |
 | 010 | [Proxy provider і domain circuit breaker](archive/010-p1-06-proxy-circuit-breaker/spec.md) | `P1-06` | done |
+| 011 | [JS-детекція порожнього DOM і Playwright-сайдкар](archive/011-p1-07-js-detection-playwright-sidecar/spec.md) | `P1-07` | done |
+| 012 | [Редактор spec задачі та schema diff після калібрування](archive/012-p1-10-spec-editor-schema-diff/spec.md) | `P1-10` | done |

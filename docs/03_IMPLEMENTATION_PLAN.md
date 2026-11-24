@@ -135,7 +135,7 @@
 
 - ✅ **Абстракція `ProxyProvider` (`P1-06`, `app/scraping/resilience.py`).** Прямі запити або пул проксі (`DAAS_PROXY_URLS`), стратегії `sticky_domain` / `round_robin` / `health_first`, `health_score`, тимчасовий cooldown, облік байтів і вартості (`DAAS_PROXY_COST_PER_GB_USD`) із суворим редагуванням облікових даних (`redact_proxy_url`), детерміноване виявлення антибот/CAPTCHA-маркерів (`detect_ban_marker`).
 - ✅ **Circuit breaker на домен (`P1-06`, `DomainCircuitBreaker` + `PipelineRunner` fallback).** Автомат станів `closed → open → half_open → closed`, миттєве відхилення `circuit_open` (із збереженням локального cache-hit і консервативного `full_crawl=false`), події `circuit_opened` / `circuit_fallback` / `circuit_reset`, перемикання на дозволені `PolicyGuardFetcher` дзеркала/API з `SourcePolicy.fallback_urls`, API (`/api/resilience`, `/api/resilience/circuits/{domain}/reset`), Prometheus-метрики у `/api/metrics`, CLI (`proxy-status`, `circuit-reset`) та панель у `SourcesPanel`.
-- `PlaywrightFetcher` як сайдкар-контейнер; детекція «порожній HTML без контенту» → JS-рендер (`P1-07`).
+- ✅ **JS-детекція порожнього DOM і Playwright-сайдкар (`P1-07`, `app/scraping/js_render.py`, `deploy/playwright-sidecar/`).** Детермінований детектор порожньої SPA-оболонки `detect_js_shell`, режим `DAAS_FETCH_ENGINE=auto` (HTTP → JS-рендер → `RawCache`, із безпечним fallback на HTTP при збої), HTTP-клієнт `PlaywrightSidecarClient` + ізольований Docker-сайдкар під профілем `playwright` у `docker-compose.prod.yml` без важких залежностей у ядрі, збереження SSRF на `final_url`, `PolicyGuardFetcher`, `detect_ban_marker` та `DomainCircuitBreaker`, події `js_rendered`/`js_render_fallback`, метрики `/api/metrics`, `daas doctor` та UI в `SourcesPanel`.
 - Пагінація: `?page=N`, `next`-links, `sitemap.xml` як frontier; пріоритети URL (`P2-01`).
 - Cookie/consent-банер: детерміновані правила + optional LLM-підказка (без кліків наосліп).
 
@@ -183,8 +183,8 @@
 
 ### 3.7. UX-борг
 
-- Редактор spec: перейменування/видалення/перестановка колонок, зміна типу, ручні селектори.
-- Schema diff після калібрування (що змінилося) + кнопка «відкотити».
+- ✅ **Редактор spec (`P1-10`):** додавання колонок будь-яких методів, редагування метаданих/типу/PII/обовʼязковості, перестановка колонок (`↑`/`↓`), ручні CSS-селектори з атрибутом та валідацією (`selectolax`), пріоритет ручних селекторів у калібруванні й зборі (`PATCH /api/tasks/{id}/columns/{key}`, `POST /api/tasks/{id}/columns/reorder`, `PlanPanel.tsx`).
+- ✅ **Schema diff та відкат після калібрування (`P1-10`):** таблиця `calibration_history` (SQLite v8), `compute_schema_diff`, відкат схеми і `selector_cache` без втрати історії (`POST /api/tasks/{id}/calibration/rollback`, `CalibrationPanel.tsx`).
 - ✅ Вкладка «Карантин» (`P1-08`): підозрілі записи (`HTML`/`api_json`), причина, API approve/dismiss і UI `QuarantinePanel.tsx`.
 - «Поясни цей рядок»: чому саме такі значення (provenance + сторінка + селектор).
 - Кнопка «Затвердити та запустити» після прев'ю (двофазний flow у явному вигляді).
@@ -234,8 +234,8 @@ merge/unmerge.
 | P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 ✅ | — |
 | P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 ✅ | P1-01 |
 | P1-06 | Proxy provider + circuit breaker | M | 3 ✅ | — |
-| P1-07 | JS-детекція + Playwright сайдкар | M | 3 | P1-06 |
-| P1-10 | Редактор spec + schema diff | M | 3 | — |
+| P1-07 | JS-детекція + Playwright сайдкар | M | 3 ✅ | P1-06 |
+| P1-10 | Редактор spec + schema diff | M | 3 ✅ | — |
 | P2-01 | Discovery: sitemap/OSM/Open Data | M | P2 | — |
 | P2-02 | FTS5 + семантичний пошук | M | P2 | — |
 | P2-03 | Splink batch ER | L | P2 | P1-02 |
@@ -270,7 +270,7 @@ Prozorro) → **Фаза 3 — масштаб**. P2/P3 чекають першо
 9. **LLM локально** не завантажується автоматично (немає pull для Ollama); хмарний — за env.
    Планування/збір через CLI не можна запускати паралельно з `daas serve`: DuckDB має одного
    writer'а. Бекап під час роботи — `POST /api/maintenance/backup`.
-10. **Тяжкі рушії** (Playwright/Camoufox/Crawl4AI) не входять у базові залежності.
+10. **Тяжкі рушії** (Playwright/Camoufox/Crawl4AI) не входять у базові залежності ядра; для JS-сайтів у `P1-07` додано детермінований детектор `detect_js_shell`, режим `DAAS_FETCH_ENGINE=auto`, HTTP-клієнт `PlaywrightSidecarClient` і ізольований Docker-сайдкар (`deploy/playwright-sidecar/`, optional extra `[browser]`).
 11. **Один користувач**, без ролей; API — локальний, з єдиним токеном.
 12. **Excel** — базове форматування; складні звіти не генеруються.
 13. **Локалізація** — UI українською, без перемикача мов.
@@ -328,7 +328,7 @@ backend/
 │   ├── extraction/     # jsonld, css, learner, engine, llm_extractor, synonyms
 │   ├── llm/            # providers, router, prompts, guard, parsing
 │   ├── pipeline/       # planner, calibration, runner
-│   ├── scraping/       # fetcher, resilience (proxy/circuit breaker), politeness, page
+│   ├── scraping/       # fetcher, js_render, resilience (proxy/circuit breaker), politeness, page
 │   ├── storage/        # raw_cache (zstd), exports (csv/xlsx/parquet/json), backup
 │   ├── cli.py          # serve/init/doctor/demo/task/calibrate/collect/enrich/export/backup/proxy-status/circuit-reset
 │   ├── config.py       # Settings (env DAAS_*), Paths, runtime token
@@ -338,7 +338,9 @@ backend/
 │   ├── presets.py      # офлайн-шаблони колонок
 │   ├── runtime.py      # Studio: композиція + життєвий цикл запусків
 │   └── utils.py        # coerce, PII, SSRF, record_key, телефон/ціна
-└── tests/              # 9 модулів, fixtures/*.html
+└── tests/              # модулі тестів, fixtures/*.html
+deploy/
+└── playwright-sidecar/ # ізольований FastAPI + Playwright контейнер (docker-compose profile)
 frontend/
 └── src/                # App, Sidebar, TaskWorkspace, DataGrid, Calibration, Export, …
 ```

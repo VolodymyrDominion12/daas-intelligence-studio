@@ -1,6 +1,6 @@
 import type {
   ApiSourceSpec,
-  CalibrationReport,
+  CalibrationStateResponse,
   ConfigResponse,
   DatasetPayload,
   DeliveryChannel,
@@ -112,8 +112,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ field }),
     }),
+  updateColumn: (
+    id: string,
+    key: string,
+    payload: Partial<Omit<FieldSpec, 'key'>>,
+  ) =>
+    request<{ task: TaskInfo }>(`/tasks/${id}/columns/${encodeURIComponent(key)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  reorderColumns: (id: string, keys: string[]) =>
+    request<{ task: TaskInfo }>(`/tasks/${id}/columns/reorder`, {
+      method: 'POST',
+      body: JSON.stringify({ keys }),
+    }),
   deleteColumn: (id: string, key: string) =>
-    request<{ task: TaskInfo }>(`/tasks/${id}/columns/${key}`, { method: 'DELETE' }),
+    request<{ task: TaskInfo }>(`/tasks/${id}/columns/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    }),
   calibrate: (id: string, ack: RiskAck = {}) => {
     const params = new URLSearchParams()
     if (ack.acknowledge_high_risk) {
@@ -202,8 +218,15 @@ export const api = {
   snapshot: (id: string) => request<{ run: RunInfo }>(`/tasks/${id}/snapshot`, { method: 'POST' }),
   cancelRun: (runId: string) =>
     request<{ run: RunInfo }>(`/runs/${runId}/cancel`, { method: 'POST' }),
-  calibration: (id: string) =>
-    request<{ calibration: CalibrationReport | null }>(`/tasks/${id}/calibration`),
+  calibration: (id: string) => request<CalibrationStateResponse>(`/tasks/${id}/calibration`),
+  rollbackCalibration: (id: string, version?: number) =>
+    request<CalibrationStateResponse & { rolled_back_to: number; task: TaskInfo }>(
+      `/tasks/${id}/calibration/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(version !== undefined ? { version } : {}),
+      },
+    ),
   runs: (id: string) => request<{ items: RunInfo[] }>(`/tasks/${id}/runs`),
   events: (id: string, after = 0) =>
     request<{ items: EventInfo[] }>(`/tasks/${id}/events?after=${after}&limit=500`),

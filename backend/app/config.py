@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     per_domain_concurrency: int = 1
     allow_private_network: bool = False
 
+    # --- JS rendering & Playwright sidecar (P1-07) ------------------------
+    playwright_sidecar_url: str | None = None
+    playwright_wait_until: Literal["networkidle", "domcontentloaded", "load"] = "networkidle"
+    playwright_wait_ms: int = Field(default=700, ge=0, le=15_000)
+    js_min_text_chars: int = Field(default=120, ge=20, le=2000)
+
     # --- proxy & circuit breaker (P1-06) ----------------------------------
     proxy_urls: str = ""
     proxy_strategy: Literal["sticky_domain", "round_robin", "health_first"] = "sticky_domain"

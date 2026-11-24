@@ -180,7 +180,7 @@ class ExtractionEngine:
     def _fill_missing(self, item: dict, spec: TaskSpec, page: PageContent) -> None:
         text = page.text or ""
         for column in spec.columns:
-            if column.is_ai or item.get(column.key) not in (None, "", []):
+            if column.is_ai or column.selector or item.get(column.key) not in (None, "", []):
                 continue
             if column.dtype in ("email", "phone") or (
                 column.dtype in ("number", "integer") and "price" in column.key

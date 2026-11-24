@@ -47,9 +47,9 @@ def extract_css(
             confidence_sum += css_field.confidence
             confidence_count += 1
 
-        # Columns added after calibration: try itemprop/class-based fallbacks.
+        # Columns added after calibration: try itemprop/class-based fallbacks unless manual selector is set.
         for column in spec.columns:
-            if column.is_ai or column.key in values:
+            if column.is_ai or column.key in values or column.selector:
                 continue
             value = fallback_field(container, column)
             if value not in (None, "", []):

@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/pipeline/calibration.py` (`Calibrator`), `backend/app/extraction/learner.py`, `backend/app/extraction/synonyms.py`, `backend/app/pipeline/runner.py` (`PipelineRunner.calibrate`) |
-| **API** | `POST /api/tasks/{id}/calibrate?force&acknowledge_high_risk&reason`, `GET /api/tasks/{id}/calibration` |
+| **Код** | `backend/app/pipeline/calibration.py` (`Calibrator`, `compute_schema_diff`), `backend/app/extraction/learner.py` (`apply_manual_selectors`), `backend/app/extraction/synonyms.py`, `backend/app/pipeline/runner.py` (`PipelineRunner.calibrate`), `backend/app/runtime.py` (`calibration_state`, `rollback_calibration`) |
+| **API** | `POST /api/tasks/{id}/calibrate?force&acknowledge_high_risk&reason`, `GET /api/tasks/{id}/calibration`, `POST /api/tasks/{id}/calibration/rollback` |
 | **CLI** | `daas calibrate <id> [--ack-high-risk --reason "…"]` |
-| **Тести** | `tests/test_learner.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py` |
-| **Джерела** | `docs/01` модуль 2 (двофазний парсинг), ADR-06 |
-| **Статус** | as-built v0.1 |
+| **Тести** | `tests/test_learner.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/01` модуль 2 (двофазний парсинг), ADR-06, `docs/03` §3.4 (`P1-07`), `docs/03` §3.7 (`P1-10`) |
+| **Статус** | as-built (P1-10) |
 
 ## 1. Призначення
 Головна економія токенів: на 2–4 сторінках вивести CSS-схему **без LLM**, показати прев'ю й
@@ -74,6 +74,23 @@
 декларативним `ApiSourceSpec`, для яких калібрування є опційним і збір дозволяється одразу.
 - **Перевірка:** `tests/test_api_flow.py::test_full_pipeline` (`refused.status_code == 409`),
   `tests/test_open_api_source.py::test_api_collection_pagination_cursor_and_failure_safety` (API без калібрування)
+
+Під час калібрування SPA-сторінок події `js_rendered` / `js_render_fallback` і попередження про
+виявлену JS-оболонку регулюються [`REQ-RUN-060`](04-runs-and-collection.md#req-run-060--події-та-діагностика-js-рендерингу-в-пайплайні-і-калібруванні)
+(`tests/test_js_sidecar.py::test_pipeline_events_metrics_api_doctor_and_sidecar_deploy`).
+
+### REQ-CAL-009 — Історія калібрувань, Schema Diff і відкат схеми
+Система **ПОВИННА** зберігати історію версій калібрування задачі, формувати структурований **Schema Diff** між поточною та попередньою версією калібрування (зміна стратегії, контейнера, `item_scope`, delta `score` і `records_found`, додані/видалені поля, поля зі зміненими селектором/атрибутом/типом/покриттям) і підтримувати **відкат** до попередньої (або явно вказаної) версії калібрування.
+Під час відкату система **ПОВИННА** відновлювати активний звіт калібрування, синхронізувати кеш селекторів для доменів seed-ів (відновлювати схему з відновленої версії або очищати застарілу авто-схему, якщо схема була порожня), фіксувати версію відкату в історії без стирання попередніх записів, оновлювати статус задачі та писати подію `calibration_rolled_back`.
+- **Сценарій:** GIVEN задача має калібрування `v1` і нове калібрування `v2` зі зміненим контейнером/полями/покриттям WHEN запитується звіт калібрування або виконується відкат `rollback` THEN diff показує зміни між `v1` і `v2`, а після відкату активне калібрування і кеш селекторів повертаються до схеми `v1`, з'являється подія `calibration_rolled_back`.
+- **Відмова:** GIVEN задача має менше 2 версій калібрування або вказано неіснуючий номер версії чи триває активний запуск WHEN виконується відкат THEN система повертає `400` / `404` / `409` із зрозумілим поясненням українською і не змінює поточну схему чи статус.
+- **Перевірка:** `tests/test_spec_editor_and_diff.py::test_calibration_history_schema_diff_and_rollback`
+
+### REQ-CAL-010 — Пріоритет ручних CSS-селекторів зі spec у калібруванні й зборі
+Якщо для не-AI колонки в `TaskSpec` задано ручний CSS-селектор (`selector`), калібратор і рушій масового збору **ПОВИННІ** застосовувати саме його (разом із `attr`, якщо задано) поверх евристично вивченої чи кешованої схеми, не перекриваючи ручний селектор авто-вибором.
+- **Сценарій:** GIVEN домен уже має авто-схему в кеші селекторів, але користувач додав/оновив колонку з ручним селектором WHEN виконується калібрування або масовий збір THEN екстракція бере значення поля з ручного селектора (та `attr`) і зберігає його у витягнутих записах.
+- **Відмова:** GIVEN колонка має ручний селектор, який відсутній на сторінці WHEN виконується екстракція THEN помилка не падає, поле лишається порожнім і не підміняється випадковим селектором з авто-кешу чи regex-евристики для цього ключа.
+- **Перевірка:** `tests/test_spec_editor_and_diff.py::test_manual_selectors_take_precedence_in_calibration_and_collect`
 
 ## 3. Інваріанти
 - Калібрування не пише записи в DuckDB і не створює версію датасету.

@@ -26,6 +26,19 @@
 
    Порт `8000` прив’язаний виключно до `127.0.0.1:8000`.
 
+3. **Опційний Playwright-сайдкар для SPA-сайтів:**
+
+   Базовий образ студії не містить Chromium. Щоб ввімкнути автоматичну ескалацію порожнього JS-DOM:
+
+   ```bash
+   # У .env:
+   # DAAS_FETCH_ENGINE=auto
+   # DAAS_PLAYWRIGHT_SIDECAR_URL=http://playwright-sidecar:8765
+   docker compose -f docker-compose.prod.yml --profile playwright up -d --build
+   ```
+
+   Сайдкар ізольовано у внутрішній мережі Compose (`expose: 8765`, назовні порт не публікується).
+
 ## Варіант B — systemd (без Docker)
 
 1. Встановіть код у `/opt/daas-intelligence-studio`, виконайте `make setup`.

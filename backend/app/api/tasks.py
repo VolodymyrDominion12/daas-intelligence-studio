@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -23,8 +22,11 @@ from .schemas import (
     EnrichRequest,
     EvalRequest,
     LimitsRequest,
+    ReorderColumnsRequest,
+    RollbackCalibrationRequest,
     RunRequest,
     ScheduleRequest,
+    UpdateColumnRequest,
     UpdateSubscriptionRequest,
     UpdateTaskRequest,
     subscription_view,
@@ -77,10 +79,13 @@ async def create_task(payload: CreateTaskRequest, studio: StudioDep) -> dict[str
 def get_task(task_id: str, studio: StudioDep) -> dict[str, Any]:
     task = _task_or_404(studio, task_id)
     dataset_id = task.dataset_id or task.id
-    calibration = studio.store.get_calibration(task_id)
+    cal_state = studio.calibration_state(task_id)
     return {
         "task": task.model_dump(mode="json"),
-        "calibration": json.loads(calibration) if calibration else None,
+        "calibration": cal_state["calibration"],
+        "calibration_version": cal_state["version"],
+        "calibration_history": cal_state["history"],
+        "calibration_diff": cal_state["diff"],
         "dataset": _dataset_payload(studio, dataset_id, task.spec),
         "runs": [run.model_dump(mode="json") for run in studio.store.list_runs(task_id, limit=8)],
         "active_run": (
@@ -137,6 +142,33 @@ def add_column(task_id: str, payload: AddColumnRequest, studio: StudioDep) -> di
         f"Додано колонку {payload.field.title}",
         data={"key": payload.field.key, "method": payload.field.method},
     )
+    return {"task": updated.model_dump(mode="json")}
+
+
+@router.patch("/tasks/{task_id}/columns/{key}")
+def update_column(
+    task_id: str, key: str, payload: UpdateColumnRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        updated = studio.update_column(task_id, key, **updates)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"task": updated.model_dump(mode="json")}
+
+
+@router.post("/tasks/{task_id}/columns/reorder")
+def reorder_columns(
+    task_id: str, payload: ReorderColumnsRequest, studio: StudioDep
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        updated = studio.reorder_columns(task_id, payload.keys)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"task": updated.model_dump(mode="json")}
 
 
@@ -213,8 +245,26 @@ async def run_snapshot(task_id: str, studio: StudioDep) -> dict[str, Any]:
 @router.get("/tasks/{task_id}/calibration")
 def get_calibration(task_id: str, studio: StudioDep) -> dict[str, Any]:
     _task_or_404(studio, task_id)
-    raw = studio.store.get_calibration(task_id)
-    return {"calibration": json.loads(raw) if raw else None}
+    return studio.calibration_state(task_id)
+
+
+@router.post("/tasks/{task_id}/calibration/rollback")
+def rollback_calibration(
+    task_id: str,
+    studio: StudioDep,
+    payload: RollbackCalibrationRequest | None = None,
+) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        return studio.rollback_calibration(
+            task_id, version=payload.version if payload else None
+        )
+    except RunConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/schedules")
