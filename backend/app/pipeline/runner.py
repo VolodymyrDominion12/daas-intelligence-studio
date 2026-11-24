@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from ..compliance import login_violation
+from ..compliance import effective_policy, login_violation, redact_url
 from ..config import Settings
 from ..db.duckdb_store import AnalyticsStore, dataset_slug, detect_price_fields
 from ..db.sqlite_store import OperationalStore
@@ -33,6 +33,7 @@ from ..models import (
 )
 from ..scraping.fetcher import Fetcher
 from ..scraping.page import extract_links
+from ..scraping.resilience import DomainCircuitBreaker
 from ..storage.raw_cache import RawCache
 from ..utils import iso, normalize_domain, unique, utcnow
 from .calibration import Calibrator
@@ -46,6 +47,19 @@ def _with_query_param(url: str, key: str, value: str) -> str:
     pairs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != key]
     pairs.append((key, value))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs), ""))
+
+
+def _build_fallback_url(original_url: str, fallback: str) -> str:
+    cleaned = fallback.strip()
+    if not cleaned:
+        return ""
+    fb_parts = urlsplit(cleaned)
+    orig_parts = urlsplit(original_url)
+    if fb_parts.path in {"", "/"} and not fb_parts.query:
+        return urlunsplit(
+            (fb_parts.scheme, fb_parts.netloc, orig_parts.path or "/", orig_parts.query, "")
+        )
+    return cleaned
 
 
 @dataclass
@@ -78,6 +92,9 @@ class RunContext:
     seen_api_urls: set[str] = field(default_factory=set)
     # Entity resolution redirects (merged_key -> canonical_key)
     merge_redirects: dict[str, str] = field(default_factory=dict)
+    # Circuit breaker / mirror fallback bookkeeping per run
+    opened_circuits: set[str] = field(default_factory=set)
+    fallback_attempted: set[str] = field(default_factory=set)
 
 
 class PipelineRunner:
@@ -94,6 +111,7 @@ class PipelineRunner:
         router: LLMRouter,
         search=None,
         dispatcher=None,
+        circuit_breaker: DomainCircuitBreaker | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -106,6 +124,7 @@ class PipelineRunner:
         self.router = router
         self.search = search
         self.dispatcher = dispatcher
+        self.circuit_breaker = circuit_breaker
         self.ai = AiColumns()
 
     # ------------------------------------------------------------------
@@ -360,6 +379,52 @@ class PipelineRunner:
             # The fetch guard already wrote a redacted compliance_blocked event.
             self.store.complete_job(job["id"], status="skipped", error=result.error)
             return
+
+        if result.kind in {"blocked", "circuit_open"}:
+            domain = normalize_domain(job["url"]) or urlsplit(job["url"]).hostname or ""
+            circuit_status = (
+                self.circuit_breaker.status(domain)
+                if (self.circuit_breaker is not None and domain)
+                else None
+            )
+            if result.kind == "circuit_open" or (
+                circuit_status is not None and circuit_status.state == "open"
+            ):
+                if domain and domain not in ctx.opened_circuits:
+                    ctx.opened_circuits.add(domain)
+                    cooldown_s = (
+                        int(self.circuit_breaker.cooldown_s)
+                        if self.circuit_breaker is not None
+                        else int(self.settings.circuit_breaker_cooldown_s)
+                    )
+                    self.store.add_event(
+                        task_id,
+                        "circuit_opened",
+                        f"Circuit breaker відкрито для {domain}: пауза {cooldown_s}с",
+                        run_id=ctx.run_id,
+                        level="warning",
+                        data={
+                            "domain": domain,
+                            "state": circuit_status.state if circuit_status else "open",
+                            "reason": circuit_status.last_reason if circuit_status else result.error,
+                        },
+                    )
+                self._maybe_enqueue_fallback(job, domain, ctx)
+
+        if result.kind == "circuit_open":
+            if job.get("kind") == "api_list":
+                ctx.api_list_failed = True
+            self.store.complete_job(job["id"], status="skipped", error=result.error)
+            self.store.add_event(
+                task_id,
+                "fetch_failed",
+                f"{job['url']}: {result.error or 'circuit_open'} [skipped]",
+                run_id=ctx.run_id,
+                level="warning",
+                data={"kind": "circuit_open", "status": "skipped"},
+            )
+            return
+
         ctx.stats.pages_failed += 1
         retryable = result.kind in {"transient"}
         status = self.store.fail_job(job["id"], result.error or result.kind, retryable=retryable)
@@ -370,6 +435,48 @@ class PipelineRunner:
             task_id, "fetch_failed", f"{job['url']}: {result.error or result.kind} [{status}]",
             run_id=ctx.run_id, level=level, data={"kind": result.kind, "status": status},
         )
+
+    def _maybe_enqueue_fallback(self, job: dict, domain: str, ctx: RunContext) -> None:
+        if not domain or job["url"] in ctx.fallback_attempted:
+            return
+        policy = effective_policy(self.store, job["url"])
+        if policy is None or not policy.fallback_urls:
+            return
+        ctx.fallback_attempted.add(job["url"])
+        queued = self.store.job_counts(ctx.run_id)
+        remaining = max(0, ctx.spec.limits.max_pages - queued["total"])
+        if remaining <= 0:
+            return
+        for raw_fb in policy.fallback_urls:
+            fb_url = _build_fallback_url(job["url"], raw_fb)
+            if not fb_url or fb_url == job["url"] or fb_url in ctx.fallback_attempted:
+                continue
+            if login_violation(fb_url) is not None:
+                self.store.add_event(
+                    ctx.task.id,
+                    "compliance_blocked",
+                    f"Відхилено небезпечний fallback URL: {redact_url(fb_url)}",
+                    run_id=ctx.run_id,
+                    level="warning",
+                )
+                continue
+            ctx.fallback_attempted.add(fb_url)
+            total = self.store.enqueue_urls(
+                ctx.run_id,
+                ctx.task.id,
+                [(fb_url, job["depth"], job["url"])],
+                kind=job.get("kind") or "fetch",
+            )
+            ctx.stats.urls_total = total
+            self.store.add_event(
+                ctx.task.id,
+                "circuit_fallback",
+                f"Перемикання {job['url']} → {fb_url}",
+                run_id=ctx.run_id,
+                level="info",
+                data={"from_url": job["url"], "to_url": fb_url, "domain": domain},
+            )
+            break
 
     def _quarantine_items(
         self, items: list[dict], source_url: str, ctx: RunContext

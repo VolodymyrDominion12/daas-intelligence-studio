@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/README.md` |
-| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py` |
+| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py`, `tests/test_proxy_resilience.py` |
 | **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), `docs/05` §5 Тиждень 3, ADR-02 |
-| **Статус** | as-built v0.1 (`006-vps-deploy-and-ops`) |
+| **Статус** | as-built (`010-p1-06-proxy-circuit-breaker`) |
 
 ## 1. Розкладка сховища
 
@@ -30,7 +30,9 @@
 `.env.example` з коментарем у тій самій зміні (включно з `DAAS_SCHEDULER_ENABLED`,
 `DAAS_SCHEDULER_POLL_SECONDS`, `DAAS_TELEGRAM_BOT_TOKEN`, `DAAS_DELIVERY_TIMEOUT_S`,
 `DAAS_DELIVERY_MAX_RETRIES`, `DAAS_QUALITY_MAX_DROP_RATIO`, `DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`,
-`DAAS_EVAL_MIN_F1`). Відносний `storage_dir` — відносно кореня репо.
+`DAAS_EVAL_MIN_F1`, `DAAS_PROXY_URLS`, `DAAS_PROXY_STRATEGY`, `DAAS_PROXY_STICKY_TTL_S`,
+`DAAS_PROXY_COOLDOWN_S`, `DAAS_PROXY_COST_PER_GB_USD`, `DAAS_CIRCUIT_BREAKER_THRESHOLD`,
+`DAAS_CIRCUIT_BREAKER_COOLDOWN_S`). Відносний `storage_dir` — відносно кореня репо.
 - **Перевірка:** — (прогалина)
 
 ### REQ-OPS-002 — Офлайн-режим
@@ -70,11 +72,14 @@
 --port]`, `doctor`, `task create|list|show`, `schedule set|show|list|delete`,
 `notify add|list|test|delete`, `calibrate`, `collect [--pages]`, `enrich [--column]`, `snapshot`,
 `export [--format --mask/--no-mask --limit]`, `duplicates [--threshold]`, `changes`,
-`backup [--out --cache]`, `eval --task <id> --gold <path> [--min-f1]`.
+`backup [--out --cache]`, `eval --task <id> --gold <path> [--min-f1]`, `proxy-status`,
+`circuit-reset <domain>`.
 `calibrate/collect/schedule set` підтримують `--ack-high-risk --reason`.
 - **Перевірка (частково):** `tests/test_scheduler.py::test_cli_schedule_commands` (`schedule`),
   `tests/test_delivery.py::test_cli_notify_commands` (`notify`),
-  `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes` (`eval`); інші команди — прогалина
+  `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes` (`eval`),
+  `tests/test_proxy_resilience.py::test_resilience_api_metrics_validation_and_cli` (`proxy-status`, `circuit-reset`);
+  інші команди — прогалина
 
 ### REQ-OPS-031 — Коди виходу
 Запускові команди **ПОВИННІ** завершуватися: `2` — конфлікт запуску; `3` — комплаєнс (з підказкою

@@ -69,6 +69,7 @@ export interface SourcePolicy {
   robots_allowed: boolean | null
   license: string
   allowed_fields: string[]
+  fallback_urls?: string[]
   notes: string
   reviewed_at: string | null
 }
@@ -342,6 +343,16 @@ export interface Capabilities {
   budget_usd_default: number
   max_pages_default: number
   scheduler_enabled?: boolean
+  proxies?: {
+    pool_size: number
+    healthy_count: number
+    strategy: string
+  }
+  circuit_breaker?: {
+    threshold: number
+    cooldown_s: number
+    open_domains: number
+  }
 }
 
 export interface Overview {
@@ -418,7 +429,46 @@ export interface SourcePolicyView {
   license: string
   notes: string
   allowed_fields: string[]
+  fallback_urls: string[]
   reviewed_at: string | null
+}
+
+export interface ProxyEndpointView {
+  id: string
+  url: string
+  scheme: string
+  host: string
+  port: number | null
+  health_score: number
+  in_cooldown: boolean
+  cooldown_remaining_s: number
+  requests: number
+  successes: number
+  blocks: number
+  failures: number
+  bytes_transferred: number
+  cost_usd: number
+}
+
+export interface DomainCircuitView {
+  domain: string
+  state: 'closed' | 'open' | 'half_open'
+  consecutive_blocks: number
+  total_blocks: number
+  total_successes: number
+  total_requests: number
+  last_reason: string | null
+  cooldown_remaining_s: number
+}
+
+export interface ResilienceStatus {
+  strategy: string
+  pool_size: number
+  healthy_count: number
+  total_bytes: number
+  total_cost_usd: number
+  proxies: ProxyEndpointView[]
+  circuits: DomainCircuitView[]
 }
 
 export interface ScheduleInfo {

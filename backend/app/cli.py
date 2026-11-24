@@ -722,6 +722,31 @@ def eval_command(
     asyncio.run(run())
 
 
+@app.command("proxy-status")
+def proxy_status() -> None:
+    """Показати стан пулу проксі (без паролів) і domain circuit breakers."""
+    studio = _studio()
+    try:
+        typer.echo(json.dumps(studio.resilience_status(), ensure_ascii=False, indent=2, default=str))
+    finally:
+        asyncio.run(studio.aclose())
+
+
+@app.command("circuit-reset")
+def circuit_reset(domain: str) -> None:
+    """Скинути паузу circuit breaker для вказаного домену."""
+    studio = _studio()
+    try:
+        try:
+            res = studio.reset_circuit(domain)
+        except ValueError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"✅ Circuit breaker скинуто: {res['domain']} (state={res['circuit']['state']})")
+    finally:
+        asyncio.run(studio.aclose())
+
+
 def _writable(path: Path) -> bool:
     try:
         probe = path / ".write-probe"

@@ -133,10 +133,10 @@
 
 ### 3.4. Стійкість краулера
 
-- Абстракція `ProxyProvider` (один/пул, sticky session, health-score, ban detection, cost accounting).
-- Circuit breaker на домен: після N `blocked` — пауза й fallback на API/дзеркало.
-- `PlaywrightFetcher` як сайдкар-контейнер; детекція «порожній HTML без контенту» → JS-рендер.
-- Пагінація: `?page=N`, `next`-links, `sitemap.xml` як frontier; пріоритети URL.
+- ✅ **Абстракція `ProxyProvider` (`P1-06`, `app/scraping/resilience.py`).** Прямі запити або пул проксі (`DAAS_PROXY_URLS`), стратегії `sticky_domain` / `round_robin` / `health_first`, `health_score`, тимчасовий cooldown, облік байтів і вартості (`DAAS_PROXY_COST_PER_GB_USD`) із суворим редагуванням облікових даних (`redact_proxy_url`), детерміноване виявлення антибот/CAPTCHA-маркерів (`detect_ban_marker`).
+- ✅ **Circuit breaker на домен (`P1-06`, `DomainCircuitBreaker` + `PipelineRunner` fallback).** Автомат станів `closed → open → half_open → closed`, миттєве відхилення `circuit_open` (із збереженням локального cache-hit і консервативного `full_crawl=false`), події `circuit_opened` / `circuit_fallback` / `circuit_reset`, перемикання на дозволені `PolicyGuardFetcher` дзеркала/API з `SourcePolicy.fallback_urls`, API (`/api/resilience`, `/api/resilience/circuits/{domain}/reset`), Prometheus-метрики у `/api/metrics`, CLI (`proxy-status`, `circuit-reset`) та панель у `SourcesPanel`.
+- `PlaywrightFetcher` як сайдкар-контейнер; детекція «порожній HTML без контенту» → JS-рендер (`P1-07`).
+- Пагінація: `?page=N`, `next`-links, `sitemap.xml` як frontier; пріоритети URL (`P2-01`).
 - Cookie/consent-банер: детерміновані правила + optional LLM-підказка (без кліків наосліп).
 
 ### 3.5. Комплаєнс-енфорсмент
@@ -233,7 +233,7 @@ merge/unmerge.
 | P1-08 | Карантин у UI + причина | S | 3 ✅ | P1-01 |
 | P1-09 | Атрибуція plan-витрат + `/metrics` | S | 3 ✅ | — |
 | P1-02 | Merge/unmerge дублікатів + UI-черга | L | 3 ✅ | P1-01 |
-| P1-06 | Proxy provider + circuit breaker | M | 3 | — |
+| P1-06 | Proxy provider + circuit breaker | M | 3 ✅ | — |
 | P1-07 | JS-детекція + Playwright сайдкар | M | 3 | P1-06 |
 | P1-10 | Редактор spec + schema diff | M | 3 | — |
 | P2-01 | Discovery: sitemap/OSM/Open Data | M | P2 | — |
@@ -261,7 +261,9 @@ Prozorro) → **Фаза 3 — масштаб**. P2/P3 чекають першо
    (`app/pipeline/quality.py`, `daas eval`, авто-інваріанти `quality_checks`).
 5. **Калібрування** зберігає одну схему на `domain + entity`; сайти з кількома шаблонами потребують
    signature на шаблон (P1-10).
-6. **Проксі/ротації немає** — один IP, per-domain rate limit.
+6. ~~**Проксі/ротації немає** — один IP, per-domain rate limit.~~ Закрито в P1-06 (`app/scraping/resilience.py`:
+   `PoolProxyProvider` із sticky/health/cooldown/обліком вартості, детермінована детекція банів `detect_ban_marker`,
+   `DomainCircuitBreaker`, `SourcePolicy.fallback_urls` у `PipelineRunner`, `/api/resilience`, `/api/metrics`, CLI `proxy-status`/`circuit-reset` та UI).
 7. ~~**Планувальника немає** — запуск вручну/через API.~~ Закрито в P1-05 (`app/pipeline/scheduler.py` та вкладка «Розклад і доставка» в UI).
 8. ~~**Дедуплікація** — лише кандидати, без злиття.~~ Закрито в P1-02 (`entity_links`, детерміновані політики злиття,
    оборотне роз'єднання без втрати історії, канонічний редірект при повторному зборі та інтерактивна UI-черга).
@@ -326,9 +328,9 @@ backend/
 │   ├── extraction/     # jsonld, css, learner, engine, llm_extractor, synonyms
 │   ├── llm/            # providers, router, prompts, guard, parsing
 │   ├── pipeline/       # planner, calibration, runner
-│   ├── scraping/       # fetcher, politeness (robots/rate), page (markdown/links)
+│   ├── scraping/       # fetcher, resilience (proxy/circuit breaker), politeness, page
 │   ├── storage/        # raw_cache (zstd), exports (csv/xlsx/parquet/json), backup
-│   ├── cli.py          # serve/init/doctor/demo/task/calibrate/collect/enrich/export/backup
+│   ├── cli.py          # serve/init/doctor/demo/task/calibrate/collect/enrich/export/backup/proxy-status/circuit-reset
 │   ├── config.py       # Settings (env DAAS_*), Paths, runtime token
 │   ├── demo.py         # офлайн-сайт + живий демо-сервер
 │   ├── main.py         # FastAPI factory, auth, CSP, SPA

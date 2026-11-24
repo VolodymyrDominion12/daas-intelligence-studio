@@ -298,10 +298,24 @@ def update_source(domain: str, payload: SourcePolicyRequest, studio: StudioDep) 
         license=payload.license,
         notes=payload.notes,
         allowed_fields=payload.allowed_fields,
+        fallback_urls=payload.fallback_urls,
         reviewed_at=utcnow() if payload.reviewed else None,
     )
     studio.store.upsert_source_policy(policy)
     return {"item": policy_view(policy).model_dump()}
+
+
+@router.get("/resilience")
+def get_resilience(studio: StudioDep) -> dict[str, Any]:
+    return studio.resilience_status()
+
+
+@router.post("/resilience/circuits/{domain}/reset")
+def reset_circuit_endpoint(domain: str, studio: StudioDep) -> dict[str, Any]:
+    try:
+        return studio.reset_circuit(domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/maintenance/backup")

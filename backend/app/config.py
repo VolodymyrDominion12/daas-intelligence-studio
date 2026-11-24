@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     per_domain_concurrency: int = 1
     allow_private_network: bool = False
 
+    # --- proxy & circuit breaker (P1-06) ----------------------------------
+    proxy_urls: str = ""
+    proxy_strategy: Literal["sticky_domain", "round_robin", "health_first"] = "sticky_domain"
+    proxy_sticky_ttl_s: float = Field(default=600.0, ge=5.0, le=86_400.0)
+    proxy_cooldown_s: float = Field(default=60.0, ge=1.0, le=3_600.0)
+    proxy_cost_per_gb_usd: float = Field(default=0.0, ge=0.0, le=100.0)
+    circuit_breaker_threshold: int = Field(default=3, ge=1, le=50)
+    circuit_breaker_cooldown_s: float = Field(default=120.0, ge=1.0, le=86_400.0)
+
     # --- pipeline limits --------------------------------------------------
     sample_size: int = 4
     max_pages_per_run: int = 50

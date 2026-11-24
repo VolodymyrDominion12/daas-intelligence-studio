@@ -125,12 +125,33 @@ class SourcePolicyRequest(BaseModel):
     license: str = "unknown"
     notes: str = ""
     allowed_fields: list[str] = Field(default_factory=list)
+    fallback_urls: list[str] = Field(default_factory=list)
     reviewed: bool = False
 
     @field_validator("notes")
     @classmethod
     def _trim(cls, value: str) -> str:
         return value[:1000]
+
+    @field_validator("fallback_urls")
+    @classmethod
+    def _validate_fallbacks(cls, value: list[str]) -> list[str]:
+        from ..compliance import ComplianceError, assert_logged_out
+
+        cleaned: list[str] = []
+        for raw in value:
+            url = str(raw or "").strip()
+            if not url:
+                continue
+            if not url.startswith(("http://", "https://")):
+                raise ValueError("Fallback URL має починатися з http:// або https://")
+            try:
+                assert_logged_out(url)
+            except ComplianceError as exc:
+                raise ValueError(str(exc)) from exc
+            if url not in cleaned:
+                cleaned.append(url)
+        return cleaned
 
 
 class SourcePolicyView(BaseModel):
@@ -139,6 +160,7 @@ class SourcePolicyView(BaseModel):
     license: str
     notes: str = ""
     allowed_fields: list[str] = Field(default_factory=list)
+    fallback_urls: list[str] = Field(default_factory=list)
     reviewed_at: str | None = None
 
 
@@ -149,6 +171,7 @@ def policy_view(policy: SourcePolicy) -> SourcePolicyView:
         license=policy.license,
         notes=policy.notes,
         allowed_fields=policy.allowed_fields,
+        fallback_urls=policy.fallback_urls,
         reviewed_at=policy.reviewed_at.isoformat() if policy.reviewed_at else None,
     )
 

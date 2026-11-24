@@ -5,7 +5,7 @@
 | **Код** | `frontend/src/App.tsx`, `frontend/src/api.ts`, `frontend/src/types.ts`, `frontend/src/format.tsx`, `frontend/src/main.tsx`, `frontend/src/styles.css`, `frontend/src/components/*.tsx`, `frontend/vite.config.ts`, `frontend/index.html` |
 | **Тести** | немає автоматичних JS-тестів; `npm run typecheck` і `npm run build` (`tsc -b && vite build`) у CI; скріншоти `docs/assets/ui-*.png` |
 | **Джерела** | `docs/01` §4 (UI/UX), `docs/05` §5 Тиждень 3, ADR-10 |
-| **Статус** | as-built (`009-p1-02-entity-merge`) |
+| **Статус** | as-built (`010-p1-06-proxy-circuit-breaker`) |
 
 ## 1. Призначення
 Одна сторінка-студія українською: список задач, створення задачі, робочий простір із вкладками,
@@ -24,7 +24,7 @@
 | `CalibrationPanel` | прев'ю, покриття, стратегія, попередження |
 | `AutomationPanel` | cron-розклад (UTC + пресети + 428 ack), підписки Telegram/Webhook (CRUD + test + фільтри + маскування секрету), звіт якості та запуск gold-set eval |
 | `QuarantinePanel` | пагінований перегляд підозрілих записів із причиною, датою, джерелом, JSON-прев'ю; «Підтвердити в датасет» та «Відхилити» |
-| `ChangesPanel`, `DuplicatesPanel`, `SourcesPanel` (`MiscPanels`) | зміни, інтерактивна черга дублікатів (порівняння полів, вибір політики, merge/dismiss, таблиця `entity_links` з unmerge), реєстр джерел |
+| `ChangesPanel`, `DuplicatesPanel`, `SourcesPanel` (`MiscPanels`) | зміни, інтерактивна черга дублікатів (порівняння полів, вибір політики, merge/dismiss, таблиця `entity_links` з unmerge), реєстр джерел (`fallback_urls`), стан пулу проксі та доменних circuit breakers із «Скинути паузу» |
 | `ExportPanel` | формат, маскування PII, ліміт, список файлів |
 | `EventsPanel` | живий журнал і активний запуск |
 
@@ -97,6 +97,13 @@ JSON-переглядом полів, кнопки «Підтвердити в �
 - для кожного кандидата — порівняння полів записів A і B, показ якості ідентичності, кнопки «Злити в A», «Злити в B» і «Не дублікат»;
 - перелік активних та історичних `entity_links` із кнопкою «Роз'єднати» для активних злитих записів та автоматичним оновленням лічильника рядків і таблиці даних (`onRefresh`);
 - стани завантаження, порожньої черги та показ помилок (`toast`).
+- **Перевірка:** `npm run typecheck`, `npm run build` (прогалина JS-рендер тестів за §4)
+
+### REQ-UI-015 — Відображення пулу проксі, circuit breakers і fallback-дзеркал у вкладці «Джерела» (`P1-06`)
+`SourcesPanel` у веб-інтерфейсі **ПОВИНЕН** бути синхронним із API-контрактом (`types.ts`, `api.ts`) і показувати:
+- блок «Проксі та стійкість краулера» зі станом проксі (redacted host/port, health %, запити, байти, вартість USD) та списком доменних circuit breakers із кнопкою «Скинути паузу»;
+- поле редагування `fallback_urls` (API / дзеркала на випадок блокування) у формі політики домену;
+- стани завантаження, порожніх налаштувань та показ помилок (`toast`).
 - **Перевірка:** `npm run typecheck`, `npm run build` (прогалина JS-рендер тестів за §4)
 
 ## 4. Прогалини

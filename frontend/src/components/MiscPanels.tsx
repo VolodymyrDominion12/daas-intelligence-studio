@@ -6,6 +6,7 @@ import type {
   EntityLinkInfo,
   EventInfo,
   MergePolicy,
+  ResilienceStatus,
   SourcePolicyView,
   ToastMessage,
 } from '../types'
@@ -485,16 +486,46 @@ export function DuplicatesPanel({
   )
 }
 
+const CIRCUIT_STATE_LABELS: Record<string, string> = {
+  closed: 'Закритий (OK)',
+  open: 'Пауза (Open)',
+  half_open: 'Проба (Half-open)',
+}
+
 export function SourcesPanel({ onToast }: { onToast: (toast: ToastMessage) => void }) {
   const [items, setItems] = useState<SourcePolicyView[]>([])
+  const [resilience, setResilience] = useState<ResilienceStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [resilienceError, setResilienceError] = useState<string | null>(null)
+  const [resettingDomain, setResettingDomain] = useState<string | null>(null)
 
   const load = async () => {
+    setResilienceError(null)
     try {
-      const response = await api.sources()
-      setItems(response.items)
-    } catch (error) {
-      onToast({ kind: 'error', text: error instanceof Error ? error.message : 'Помилка' })
+      const [sourcesRes, resilienceRes] = await Promise.allSettled([
+        api.sources(),
+        api.resilience(),
+      ])
+      if (sourcesRes.status === 'fulfilled') {
+        setItems(sourcesRes.value.items)
+      } else {
+        onToast({
+          kind: 'error',
+          text:
+            sourcesRes.reason instanceof Error
+              ? sourcesRes.reason.message
+              : 'Не вдалося завантажити джерела',
+        })
+      }
+      if (resilienceRes.status === 'fulfilled') {
+        setResilience(resilienceRes.value)
+      } else {
+        setResilienceError(
+          resilienceRes.reason instanceof Error
+            ? resilienceRes.reason.message
+            : 'Не вдалося завантажити статус проксі',
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -504,27 +535,206 @@ export function SourcesPanel({ onToast }: { onToast: (toast: ToastMessage) => vo
     void load()
   }, [])
 
+  const handleResetCircuit = async (domain: string) => {
+    setResettingDomain(domain)
+    try {
+      await api.resetCircuit(domain)
+      onToast({ kind: 'success', text: `Паузу circuit breaker скинуто для ${domain}` })
+      await load()
+    } catch (error) {
+      onToast({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Не вдалося скинути circuit breaker',
+      })
+    } finally {
+      setResettingDomain(null)
+    }
+  }
+
   return (
-    <section className="card">
-      <div className="card-head">
-        <h3 className="card-title">Реєстр джерел</h3>
-        <span className="chip">{items.length}</span>
-      </div>
-      <p className="lede">
-        Політика кожного домену: ризик ToS, ліцензія, нотатки. Це не формальність — саме тут
-        фіксується, що можна продавати, а що ні. Robots.txt перевіряється автоматично перед
-        кожним запитом.
-      </p>
-      {loading && <div className="spinner" />}
-      <div className="stack">
-        {items.map((item) => (
-          <SourceRow key={item.domain} item={item} onSaved={load} onToast={onToast} />
-        ))}
-        {!loading && items.length === 0 && (
-          <div className="empty-hint">Джерела з'являться після створення задачі з URL.</div>
+    <div className="stack">
+      <section className="card">
+        <div className="card-head">
+          <h3 className="card-title">Проксі та стійкість краулера</h3>
+          <div className="card-actions">
+            {resilience && (
+              <span className="chip">
+                проксі {resilience.healthy_count}/{resilience.pool_size} · {resilience.strategy}
+              </span>
+            )}
+            <button className="btn btn--tiny" onClick={() => void load()} disabled={loading}>
+              Оновити
+            </button>
+          </div>
+        </div>
+        <p className="lede">
+          Пул проксі (облікові дані маскуються), витрати трафіку й автоматичні паузи доменів
+          (circuit breaker) при серійних блокуваннях.
+        </p>
+
+        {loading && !resilience && (
+          <div className="drawer-loading">
+            <span className="spinner" /> Завантаження статусу проксі…
+          </div>
         )}
-      </div>
-    </section>
+        {resilienceError && <div className="alert alert--error">{resilienceError}</div>}
+
+        {resilience && (
+          <div className="stack">
+            <div className="chip-row">
+              <span className="chip">
+                Трафік: {fmtNumber(resilience.total_bytes)} B
+              </span>
+              <span className="chip">
+                Вартість: ${resilience.total_cost_usd.toFixed(4)}
+              </span>
+              <span className="chip">
+                Доменів на моніторингу: {resilience.circuits.length}
+              </span>
+            </div>
+
+            {resilience.proxies.length === 0 ? (
+              <div className="empty-hint">
+                Проксі не налаштовані (DAAS_PROXY_URLS порожній) — краулер працює напряму.
+              </div>
+            ) : (
+              <div className="table-wrap">
+                <table className="table table--compact">
+                  <thead>
+                    <tr>
+                      <th>Проксі</th>
+                      <th>Здоров’я</th>
+                      <th>Запити (OK / Блок)</th>
+                      <th>Трафік / Вартість</th>
+                      <th>Стан</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {resilience.proxies.map((proxy) => (
+                      <tr key={proxy.id}>
+                        <td>
+                          <code className="mono-small">{proxy.url}</code>
+                        </td>
+                        <td>
+                          <span
+                            className={`conf ${
+                              proxy.health_score >= 0.7
+                                ? 'conf--high'
+                                : proxy.health_score >= 0.35
+                                  ? 'conf--mid'
+                                  : 'conf--low'
+                            }`}
+                          >
+                            {Math.round(proxy.health_score * 100)}%
+                          </span>
+                        </td>
+                        <td className="mono-small">
+                          {proxy.requests} ({proxy.successes} / {proxy.blocks})
+                        </td>
+                        <td className="mono-small">
+                          {fmtNumber(proxy.bytes_transferred)} B · ${proxy.cost_usd.toFixed(4)}
+                        </td>
+                        <td>
+                          {proxy.in_cooldown ? (
+                            <span className="status status--partial">
+                              Cooldown {proxy.cooldown_remaining_s}с
+                            </span>
+                          ) : (
+                            <span className="status status--ok">Активний</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {resilience.circuits.length === 0 ? (
+              <div className="empty-hint">
+                Поки не зафіксовано блокувань або circuit breakers по доменах.
+              </div>
+            ) : (
+              <div className="table-wrap">
+                <table className="table table--compact">
+                  <thead>
+                    <tr>
+                      <th>Домен</th>
+                      <th>Circuit</th>
+                      <th>Блоки (поспіль / всього)</th>
+                      <th>Остання причина</th>
+                      <th>Дія</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {resilience.circuits.map((circuit) => (
+                      <tr key={circuit.domain}>
+                        <td>
+                          <code className="mono-small">{circuit.domain}</code>
+                        </td>
+                        <td>
+                          <span
+                            className={`status ${
+                              circuit.state === 'closed'
+                                ? 'status--ok'
+                                : circuit.state === 'open'
+                                  ? 'status--error'
+                                  : 'status--partial'
+                            }`}
+                          >
+                            {CIRCUIT_STATE_LABELS[circuit.state] ?? circuit.state}
+                            {circuit.state === 'open' && circuit.cooldown_remaining_s > 0
+                              ? ` (${circuit.cooldown_remaining_s}с)`
+                              : ''}
+                          </span>
+                        </td>
+                        <td className="mono-small">
+                          {circuit.consecutive_blocks} / {circuit.total_blocks}
+                        </td>
+                        <td className="mono-small">{circuit.last_reason || '—'}</td>
+                        <td>
+                          {circuit.state !== 'closed' ? (
+                            <button
+                              className="btn btn--tiny"
+                              onClick={() => void handleResetCircuit(circuit.domain)}
+                              disabled={resettingDomain !== null}
+                            >
+                              {resettingDomain === circuit.domain ? 'Скидання…' : 'Скинути паузу'}
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h3 className="card-title">Реєстр джерел</h3>
+          <span className="chip">{items.length}</span>
+        </div>
+        <p className="lede">
+          Політика кожного домену: ризик ToS, ліцензія, fallback-дзеркала на випадок блокувань і
+          нотатки. Robots.txt і комплаєнс перевіряються автоматично перед кожним запитом.
+        </p>
+        {loading && items.length === 0 && <div className="spinner" />}
+        <div className="stack">
+          {items.map((item) => (
+            <SourceRow key={item.domain} item={item} onSaved={load} onToast={onToast} />
+          ))}
+          {!loading && items.length === 0 && (
+            <div className="empty-hint">Джерела з'являться після створення задачі з URL.</div>
+          )}
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -540,15 +750,28 @@ function SourceRow({
   const [risk, setRisk] = useState(item.tos_risk)
   const [license, setLicense] = useState(item.license)
   const [notes, setNotes] = useState(item.notes)
+  const [fallbackText, setFallbackText] = useState((item.fallback_urls ?? []).join(', '))
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setRisk(item.tos_risk)
+    setLicense(item.license)
+    setNotes(item.notes)
+    setFallbackText((item.fallback_urls ?? []).join(', '))
+  }, [item])
 
   const save = async (reviewed: boolean) => {
     setSaving(true)
+    const fallbackUrls = fallbackText
+      .split(/[,\n]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
     try {
       await api.updateSource(item.domain, {
         tos_risk: risk,
         license,
         notes,
+        fallback_urls: fallbackUrls,
         reviewed,
       })
       await onSaved()
@@ -591,6 +814,17 @@ function SourceRow({
           />
         </label>
       </div>
+      <label className="field">
+        <span className="field-label">
+          Fallback URLs (дзеркала або публічний API, через кому)
+        </span>
+        <input
+          className="input input--mono"
+          value={fallbackText}
+          onChange={(event) => setFallbackText(event.target.value)}
+          placeholder="https://mirror.example/api/catalog"
+        />
+      </label>
       <label className="field">
         <span className="field-label">Нотатки</span>
         <input

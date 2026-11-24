@@ -46,6 +46,7 @@ from .pipeline.quality import GoldCase, load_gold_set, resolve_gold_preset_path,
 from .pipeline.runner import PipelineRunner
 from .pipeline.scheduler import TaskScheduler, next_cron_after, validate_cron
 from .scraping.fetcher import build_fetcher
+from .scraping.resilience import DomainCircuitBreaker, build_proxy_provider
 from .storage.raw_cache import RawCache
 from .utils import (
     assert_public_url,
@@ -53,6 +54,7 @@ from .utils import (
     hash_text,
     iso,
     json_dumps,
+    normalize_domain,
     record_key_for,
     utcnow,
 )
@@ -78,9 +80,21 @@ class Studio:
         self.store = OperationalStore(self.paths)
         self.analytics = AnalyticsStore(self.paths)
         self.cache = RawCache(self.paths.raw_cache, self.store)
+        self.proxy_provider = build_proxy_provider(self.settings)
+        self.circuit_breaker = DomainCircuitBreaker(
+            threshold=self.settings.circuit_breaker_threshold,
+            cooldown_s=self.settings.circuit_breaker_cooldown_s,
+        )
         # Every request goes through the source-registry guard (P1-04).
         self.fetcher = PolicyGuardFetcher(
-            fetcher or build_fetcher(self.settings, cache=self.cache), self.store
+            fetcher
+            or build_fetcher(
+                self.settings,
+                cache=self.cache,
+                proxy_provider=self.proxy_provider,
+                circuit_breaker=self.circuit_breaker,
+            ),
+            self.store,
         )
         self.router = LLMRouter(self.settings, self.store)
         self.search = build_search(self.settings)
@@ -100,6 +114,7 @@ class Studio:
             self.router,
             self.search,
             dispatcher=self.dispatcher,
+            circuit_breaker=self.circuit_breaker,
         )
         self.planner = Planner(
             self.settings,
@@ -958,9 +973,34 @@ class Studio:
         }
 
     # ------------------------------------------------------------------
+    # proxy & circuit resilience (P1-06)
+    # ------------------------------------------------------------------
+    def resilience_status(self) -> dict[str, Any]:
+        data = self.proxy_provider.snapshot()
+        data["circuits"] = [
+            item.model_dump(mode="json") for item in self.circuit_breaker.snapshot()
+        ]
+        return data
+
+    def reset_circuit(self, domain: str) -> dict[str, Any]:
+        norm = normalize_domain(domain) or domain.strip().lower()
+        if not norm:
+            raise ValueError("Некоректний домен")
+        status = self.circuit_breaker.reset(norm)
+        self.store.add_event(
+            "system",
+            "circuit_reset",
+            f"Circuit breaker скинуто для {norm}",
+            level="info",
+            data={"domain": norm, "state": status.state},
+        )
+        return {"domain": norm, "circuit": status.model_dump(mode="json")}
+
+    # ------------------------------------------------------------------
     # info
     # ------------------------------------------------------------------
     def capabilities(self) -> dict[str, Any]:
+        proxy_snap = self.proxy_provider.snapshot()
         return {
             "version": __version__,
             "offline": self.settings.offline,
@@ -979,6 +1019,16 @@ class Studio:
             "budget_usd_default": self.settings.llm_budget_usd,
             "max_pages_default": self.settings.max_pages_per_run,
             "scheduler_enabled": self.settings.scheduler_enabled,
+            "proxies": {
+                "pool_size": proxy_snap["pool_size"],
+                "healthy_count": proxy_snap["healthy_count"],
+                "strategy": proxy_snap["strategy"],
+            },
+            "circuit_breaker": {
+                "threshold": self.circuit_breaker.threshold,
+                "cooldown_s": self.circuit_breaker.cooldown_s,
+                "open_domains": self.circuit_breaker.open_count(),
+            },
         }
 
     def overview(self) -> dict[str, Any]:
@@ -1003,6 +1053,9 @@ class Studio:
             an = {"records_current": 0, "records_quarantined": 0}
 
         cache_pages = int(self.cache.stats().get("pages") or 0)
+        proxy_snap = self.proxy_provider.snapshot()
+        open_circuits = int(self.circuit_breaker.open_count())
+        rejected_circuits = int(self.circuit_breaker.total_rejected)
 
         def esc(value: str) -> str:
             return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
@@ -1049,6 +1102,7 @@ class Studio:
             "# TYPE daas_blocked_total counter",
             f'daas_blocked_total{{reason="robots"}} {int(op["robots_blocked"])}',
             f'daas_blocked_total{{reason="compliance"}} {int(op["compliance_blocked"])}',
+            f'daas_blocked_total{{reason="circuit_open"}} {rejected_circuits}',
             "# HELP daas_records_current Current active records in analytical store.",
             "# TYPE daas_records_current gauge",
             f"daas_records_current {int(an['records_current'])}",
@@ -1085,6 +1139,21 @@ class Studio:
             "# HELP daas_raw_cache_pages Number of HTML/JSON pages in raw cache.",
             "# TYPE daas_raw_cache_pages gauge",
             f"daas_raw_cache_pages {cache_pages}",
+            "# HELP daas_proxy_pool_size Configured proxy endpoints in the pool.",
+            "# TYPE daas_proxy_pool_size gauge",
+            f"daas_proxy_pool_size {int(proxy_snap['pool_size'])}",
+            "# HELP daas_proxy_healthy Healthy proxies not currently in cooldown.",
+            "# TYPE daas_proxy_healthy gauge",
+            f"daas_proxy_healthy {int(proxy_snap['healthy_count'])}",
+            "# HELP daas_proxy_bytes_total Total bytes transferred through proxies.",
+            "# TYPE daas_proxy_bytes_total counter",
+            f"daas_proxy_bytes_total {int(proxy_snap['total_bytes'])}",
+            "# HELP daas_proxy_cost_usd_total Estimated proxy bandwidth cost in USD.",
+            "# TYPE daas_proxy_cost_usd_total counter",
+            f"daas_proxy_cost_usd_total {fmt_usd(float(proxy_snap['total_cost_usd']))}",
+            "# HELP daas_circuit_open_domains Number of domains currently in open circuit breaker state.",
+            "# TYPE daas_circuit_open_domains gauge",
+            f"daas_circuit_open_domains {open_circuits}",
         ])
         return "\n".join(lines) + "\n"
 

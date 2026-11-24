@@ -5,7 +5,7 @@
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
 | **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py` |
 | **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`) |
-| **Статус** | as-built (P1-02) |
+| **Статус** | as-built (P1-06) |
 
 ## 1. Сутності
 
@@ -24,7 +24,7 @@
 | Зв'язок сутностей | `EntityLinkInfo` | SQLite `entity_links` | Pairwise рішення (`merged`/`dismissed`/`unmerged`), політика, ревізії до злиття |
 | Схема селекторів | `CssSchema` | SQLite `selector_cache` | Результат калібрування на `domain + entity` |
 | Звіт калібрування | `CalibrationReport` | SQLite `calibrations` | Прев'ю, покриття, попередження |
-| Політика джерела | `SourcePolicy` | SQLite `source_registry` | `tos_risk`, ліцензія, нотатки |
+| Політика джерела | `SourcePolicy` | SQLite `source_registry` | `tos_risk`, ліцензія, `fallback_urls`, нотатки |
 | Зміна | `ChangeEvent` | події + `snapshots/…/manifest.json` | `new_entity`, `removed_entity`, `field_changed`, `price_drop` |
 
 `dataset_id` = `task.dataset_id or task.id` (у v0.1 один датасет на задачу).
@@ -117,6 +117,8 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `page_extracted` | debug | runner | Сторінка дала записи |
 | `no_records` | warning/debug | runner | Сторінка без записів |
 | `fetch_failed`, `job_failed` | warning/error | runner | Відмова завантаження / виняток у задачі черги |
+| `circuit_opened`, `circuit_fallback` | warning/info | `pipeline/runner.py` | Домен перейшов у `open` після серії блоків / перемикання на fallback URL |
+| `circuit_reset` | info | `runtime.Studio` (`task_id="system"`) | Ручне скидання паузи circuit breaker домену |
 | `json_parse_failed` | warning | runner | Не вдалося розібрати JSON-відповідь API (`data.url`, `data.error`) |
 | `api_cursor_saved` | info | runner | Збережено інкрементальний курсор/URL API після успішної фіксації версії |
 | `robots_blocked` | warning | runner | Пропущено через robots.txt |

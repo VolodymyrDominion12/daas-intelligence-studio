@@ -13,7 +13,7 @@
 
 | # | Зміна | Беклог | Статус |
 |:---|:---|:---|:---|
-| — | _(поки немає)_ | — | — |
+| — | _(активних змін немає)_ | — | — |
 
 ## Архівовані зміни
 
@@ -28,3 +28,4 @@
 | 007 | [Карантин підозрілих записів у пайплайні та UI](archive/007-p1-08-quarantine/spec.md) | `P1-08` | done |
 | 008 | [Атрибуція plan-витрат LLM та Prometheus `/api/metrics`](archive/008-p1-09-metrics-and-spend/spec.md) | `P1-09` | done |
 | 009 | [Entity Resolution v2: merge/unmerge дублікатів + UI-черга](archive/009-p1-02-entity-merge/spec.md) | `P1-02` | done |
+| 010 | [Proxy provider і domain circuit breaker](archive/010-p1-06-proxy-circuit-breaker/spec.md) | `P1-06` | done |

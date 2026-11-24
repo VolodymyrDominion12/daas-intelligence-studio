@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py` |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built (P1-02) |
+| **Статус** | as-built (P1-06) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -45,7 +45,9 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | POST | `/api/tasks/{id}/duplicates/links/{link_id}/unmerge` | оборотне роз'єднання активного зв'язку | 07, 11 |
 | POST/GET | `/api/tasks/{id}/exports`, `/api/exports`, `/api/exports/{file}` | експорт | 09 |
 | GET | `/api/dashboard` | огляд задач | 11 |
-| GET/PUT | `/api/sources[/{domain}]` | реєстр джерел | 06 |
+| GET/PUT | `/api/sources[/{domain}]` | реєстр джерел (`tos_risk`, `license`, `fallback_urls`, `notes`) | 06, 05 |
+| GET | `/api/resilience` | статус пулу проксі (без секретів) і domain circuit breakers | 05, 11 |
+| POST | `/api/resilience/circuits/{domain}/reset` | ручне скидання паузи circuit breaker домену (`circuit_reset`) | 05, 11 |
 | POST | `/api/maintenance/backup`, `/api/maintenance/purge-cache` | обслуговування | 12, 05 |
 
 Зміна будь-якого рядка цієї таблиці (шлях, метод, тіло, коди) — це зміна контракту і потребує
@@ -130,6 +132,15 @@ LLM (REQ-LLM-003).
 - CLI команди `daas merge <task_id> <canonical_key> <merged_key> [--policy ...]` та `daas unmerge <task_id> <link_id>` (ненульовий код виходу при помилці).
 - **Перевірка:** `tests/test_entity_merge.py::test_merge_dismiss_and_reversible_unmerge_api`,
   `tests/test_entity_merge.py::test_cli_merge_and_unmerge`
+
+### REQ-API-011 — API, метрики та CLI для статусу проксі, fallback-дзеркал і circuit breakers
+Система **ПОВИННА** надавати захищені Bearer-токеном інтерфейси та CLI:
+- `GET /api/resilience` — поточний статус пулу проксі (здоров'я, cooldown, байти, вартість, без секретів) та список станів circuit breaker по доменах;
+- `POST /api/resilience/circuits/{domain}/reset` — ручне скидання circuit breaker домену з подією `circuit_reset`;
+- `PUT /api/sources/{domain}` — підтримка поля `fallback_urls` (з валідацією `http/https` і `logged-out`);
+- `GET /api/metrics` — експорт Prometheus-метрик (`daas_proxy_pool_size`, `daas_proxy_healthy`, `daas_proxy_bytes_total`, `daas_proxy_cost_usd_total`, `daas_circuit_open_domains`, `daas_blocked_total{reason="circuit_open"}`);
+- CLI команди `daas proxy-status` та `daas circuit-reset <domain>`.
+- **Перевірка:** `tests/test_proxy_resilience.py::test_resilience_api_metrics_validation_and_cli`
 
 ## 4. Відкриті питання
 - `ValueError` зі сховища (невалідний `f_<key>`, див. 08) не мапиться → 500. Додати глобальний

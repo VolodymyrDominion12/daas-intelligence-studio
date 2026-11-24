@@ -2,21 +2,21 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/scraping/fetcher.py` (`HttpFetcher`, `PlaywrightFetcher`, `FetchResult`, `build_fetcher`), `backend/app/scraping/politeness.py` (`RobotsGate`, `DomainRateLimiter`, `classify_status`), `backend/app/scraping/page.py`, `backend/app/storage/raw_cache.py`, `backend/app/utils.py` (`assert_public_url`, `canonical_url`) |
-| **API** | `POST /api/maintenance/purge-cache?older_than_days=N` |
-| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/test_open_api_source.py`, `tests/conftest.py` (`FixtureFetcher`) |
-| **Джерела** | ADR-03, ADR-09, `docs/02` §2.1 |
-| **Статус** | as-built v0.1 |
+| **Код** | `backend/app/scraping/fetcher.py` (`HttpFetcher`, `PlaywrightFetcher`, `FetchResult`, `build_fetcher`), `backend/app/scraping/resilience.py` (`ProxyProvider`, `NoopProxyProvider`, `PoolProxyProvider`, `build_proxy_provider`, `DomainCircuitBreaker`, `detect_ban_marker`, `redact_proxy_url`), `backend/app/scraping/politeness.py` (`RobotsGate`, `DomainRateLimiter`, `classify_status`), `backend/app/scraping/page.py`, `backend/app/storage/raw_cache.py`, `backend/app/utils.py` (`assert_public_url`, `canonical_url`) |
+| **API** | `POST /api/maintenance/purge-cache?older_than_days=N`, `GET /api/resilience`, `POST /api/resilience/circuits/{domain}/reset` |
+| **Тести** | `tests/test_utils.py`, `tests/test_compliance.py`, `tests/test_raw_cache_backup.py`, `tests/test_open_api_source.py`, `tests/test_proxy_resilience.py`, `tests/conftest.py` (`FixtureFetcher`) |
+| **Джерела** | ADR-03, ADR-09, `docs/02` §2.1, `docs/03` §3.4 |
+| **Статус** | as-built (P1-06) |
 
 ## 1. Призначення
 Отримати HTML публічної сторінки ввічливо (robots, rate limit, User-Agent), безпечно (SSRF, ліміт
-розміру, лише HTML/XML) і дешево (zstd-кеш). Будь-який `Fetcher` у студії обгорнутий
-`PolicyGuardFetcher` (06-compliance).
+розміру, лише HTML/XML), стійко до блокувань (пул проксі з health-score і domain circuit breaker)
+і дешево (zstd-кеш). Будь-який `Fetcher` у студії обгорнутий `PolicyGuardFetcher` (06-compliance).
 
 ## 2. Контракт `FetchResult`
 `page: PageContent | None`, `kind ∈ {ok, transient, blocked, permanent, robots, unsafe, disabled,
-empty, policy}`, `status`, `error`. `page is None` ⇔ відмова (крім `transient` зі статусом, де
-`page` несе `retry-after`).
+empty, policy, circuit_open}`, `status`, `error`. `page is None` ⇔ відмова (крім `transient` зі
+статусом, де `page` несе `retry-after`).
 
 ## 3. Вимоги
 
@@ -92,6 +92,22 @@ empty, policy}`, `status`, `error`. `page is None` ⇔ відмова (крім 
 редирект-guard, реєстру джерел (`PolicyGuardFetcher`), logged-out, `robots.txt`, rate-limit,
 обмеження розміру (6 МБ) і raw-кешу.
 - **Перевірка:** `tests/test_open_api_source.py::test_fetcher_json_mode_and_compliance_guard`
+
+### REQ-FETCH-020 — Провайдер проксі: пул, sticky-сесії, health-score та облік витрат
+Система **ПОВИННА**:
+- підтримувати роботу як без проксі (прямі запити за замовчуванням), так і з одним або пулом проксі (`DAAS_PROXY_URLS`) зі стратегіями вибору (`sticky_domain` | `round_robin` | `health_first`);
+- у режимі `sticky_domain` утримувати здоровий проксі за доменом протягом `DAAS_PROXY_STICKY_TTL_S`, а при отриманні блокування чи помилки проксі знижувати його `health_score`, скидати sticky-прив'язку, переводити проксі в тимчасовий cooldown (`DAAS_PROXY_COOLDOWN_S`) після серії відмов і ротувати наступний здоровий проксі;
+- вести облік переданих байтів і оціненої вартості (`DAAS_PROXY_COST_PER_GB_USD`) на кожен проксі й сумарно;
+- **НЕ ПОВИННА** розкривати `username`/`password` з URL проксі у відповідях API, CLI, подіях або UI.
+- **Перевірка:** `tests/test_proxy_resilience.py::test_proxy_provider_sticky_health_cost_and_redaction`
+
+### REQ-FETCH-021 — Детекція банів і domain circuit breaker
+Система **ПОВИННА**:
+- класифікувати як блокування (`blocked`) не лише HTTP-статуси `401/403/407/451`, а й детерміновані антибот/CAPTCHA-маркери у тілі відповіді (Cloudflare challenge, reCAPTCHA/hCaptcha, DataDome тощо на невеликій сторінці);
+- підтримувати для кожного домену автомат станів circuit breaker (`closed` → `open` → `half_open` → `closed`): після `DAAS_CIRCUIT_BREAKER_THRESHOLD` блокувань поспіль домен переходить у `open` на `DAAS_CIRCUIT_BREAKER_COOLDOWN_S`;
+- під час `open` негайно відхиляти нові мережеві запити до домену (`kind="circuit_open"`, локальний cache-hit залишається доступним) і після завершення паузи пропускати один пробний запит (`half_open`), який або закриває ланцюг при успіху, або знову відкриває при блокуванні;
+- зберігати можливість ручного скидання стану circuit breaker для домену.
+- **Перевірка:** `tests/test_proxy_resilience.py::test_http_fetcher_ban_detection_and_circuit_breaker_lifecycle`
 
 ## 4. Спостережувана поведінка / відкриті питання
 - `Crawl-delay` зберігається під `urlsplit(url).hostname`, а `wait_turn` шукає RPS під

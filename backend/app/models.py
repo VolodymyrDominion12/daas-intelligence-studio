@@ -85,8 +85,29 @@ class SourcePolicy(BaseModel):
     robots_allowed: bool | None = None
     license: str = "unknown"
     allowed_fields: list[str] = Field(default_factory=list)
+    fallback_urls: list[str] = Field(default_factory=list)
     notes: str = ""
     reviewed_at: datetime | None = None
+
+    @field_validator("fallback_urls")
+    @classmethod
+    def _validate_fallback_urls(cls, value: list[str]) -> list[str]:
+        from .compliance import ComplianceError, assert_logged_out
+
+        cleaned: list[str] = []
+        for raw in value:
+            url = str(raw or "").strip()
+            if not url:
+                continue
+            if not url.startswith(("http://", "https://")):
+                raise ValueError("fallback URL must start with http:// or https://")
+            try:
+                assert_logged_out(url)
+            except ComplianceError as exc:
+                raise ValueError(str(exc)) from exc
+            if url not in cleaned:
+                cleaned.append(url)
+        return cleaned
 
 
 class ApiSourceSpec(BaseModel):

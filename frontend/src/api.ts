@@ -5,6 +5,7 @@ import type {
   DatasetPayload,
   DeliveryChannel,
   DeliveryFilters,
+  DomainCircuitView,
   DuplicatesResponse,
   EntityLinkInfo,
   EvalReport,
@@ -19,6 +20,7 @@ import type {
   RecordDetail,
   RecordRow,
   RecordsResponse,
+  ResilienceStatus,
   RunInfo,
   ScheduleInfo,
   SourcePolicyView,
@@ -292,6 +294,7 @@ export const api = {
       license: string
       notes: string
       allowed_fields?: string[]
+      fallback_urls?: string[]
       reviewed?: boolean
     },
   ) =>
@@ -299,4 +302,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+  resilience: () => request<ResilienceStatus>('/resilience'),
+  resetCircuit: (domain: string) =>
+    request<{ domain: string; circuit: DomainCircuitView }>(
+      `/resilience/circuits/${encodeURIComponent(domain)}/reset`,
+      { method: 'POST' },
+    ),
 }
