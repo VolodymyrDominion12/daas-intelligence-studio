@@ -236,6 +236,7 @@ make specs-check            # спеки ↔ тести ↔ модулі
 | [03. План і статус](docs/03_IMPLEMENTATION_PLAN.md) | що зроблено, беклог, критерії приймання, обмеження |
 | [04. Парсер маркетплейсів](docs/04_MARKETPLACE_PARSER_CONCEPT.md) | Rozetka/Prom.ua: позиції, картки, продажі — здійсненність і план |
 | [05. План першого продукту](docs/05_FIRST_PRODUCT_LAUNCH_PLAN.md) | вибір стартової ніші, 4-тижневий план запуску MVP та монетизація |
+| [06. План розвитку і монетизації](docs/06_DEVELOPMENT_AND_MONETIZATION_PLAN.md) | аудит as-built стану, Go-to-Market прогалини, 6-місячний roadmap і Revenue-Gates |
 
 ---
 
