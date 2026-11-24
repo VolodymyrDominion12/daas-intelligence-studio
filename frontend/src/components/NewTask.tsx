@@ -22,6 +22,13 @@ interface ExampleItem {
 
 const EXAMPLES: ExampleItem[] = [
   {
+    label: 'Prozorro Переможці (B2B)',
+    prompt:
+      'Знайди переможців тендерів Prozorro через API від 1 млн грн та проведи аудит їх сайтів, контактів і техстеку',
+    seeds: 'https://public.api.openprocurement.org/api/2.5/tenders',
+    title: 'Prozorro: переможці тендерів (B2B)',
+  },
+  {
     label: 'Prozorro API (тендери)',
     prompt:
       'Збери відкриті тендери Prozorro через API: ID, предмет закупівлі, замовник, ЄДРПОУ, CPV, регіон, сума, статус, дедлайн',

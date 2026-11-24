@@ -2,10 +2,10 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
+| **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/bot/app.py` (`create_bot_app`), `backend/app/config.py` (`load_runtime_token`) |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_subscriber_bot.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built (`013-delivery-filters-and-digest`) |
+| **Статус** | as-built (`015-telegram-subscriber-bot`) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -52,6 +52,7 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | GET | `/api/resilience` | статус пулу проксі (без секретів), domain circuit breakers і `js_renderer` | 05, 11 |
 | POST | `/api/resilience/circuits/{domain}/reset` | ручне скидання паузи circuit breaker домену (`circuit_reset`) | 05, 11 |
 | POST | `/api/maintenance/backup`, `/api/maintenance/purge-cache` | обслуговування | 12, 05 |
+| GET/POST | `bot: /health`, `/telegram/webhook`, `/billing/webhook` | окремий HTTP-сервіс тонкого Telegram-бота (секрет заголовка Telegram, HMAC оплати — `REQ-DEL-011`) | 08 |
 
 Зміна будь-якого рядка цієї таблиці (шлях, метод, тіло, коди) — це зміна контракту і потребує
 `specs/changes/` + оновлення `frontend/src/api.ts` і `types.ts` в тому самому PR.

@@ -74,6 +74,16 @@ export interface SourcePolicy {
   reviewed_at: string | null
 }
 
+export interface AutoEnrichTrigger {
+  enabled: boolean
+  min_amount: number | null
+  amount_fields: string[]
+  require_fields: string[]
+  status_field: string | null
+  allowed_statuses: string[]
+  max_records_per_run: number
+}
+
 export interface TaskSpec {
   title: string
   prompt: string
@@ -84,6 +94,7 @@ export interface TaskSpec {
   extraction: 'auto' | 'json_ld' | 'css' | 'llm' | 'api_json'
   api_source?: ApiSourceSpec | null
   enrichment: EnrichmentSpec[]
+  auto_enrich?: AutoEnrichTrigger | null
   limits: Limits
   rationale: string
   assumptions: string[]

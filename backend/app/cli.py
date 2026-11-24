@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 
 from . import __version__
+from .bot.state import BotSubscriberStore, SubscriberPlan
 from .compliance import ComplianceError, source_note
 from .config import Settings, get_settings
 from .db.duckdb_store import AnalyticsStore
@@ -25,9 +26,11 @@ app = typer.Typer(add_completion=False, help="DaaS Intelligence Studio CLI", no_
 task_app = typer.Typer(help="Керування задачами", no_args_is_help=True)
 schedule_app = typer.Typer(help="Керування розкладами запусків", no_args_is_help=True)
 notify_app = typer.Typer(help="Канали доставки дельти (Webhook / Telegram)", no_args_is_help=True)
+bot_app = typer.Typer(help="Тонкий Telegram-бот підписника", no_args_is_help=True)
 app.add_typer(task_app, name="task")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(notify_app, name="notify")
+app.add_typer(bot_app, name="bot")
 
 
 def _studio(settings: Settings | None = None) -> Studio:
@@ -484,6 +487,73 @@ def notify_delete(task_id: str, sub_id: str) -> None:
             typer.echo(f"Підписку {sub_id} не знайдено")
     finally:
         asyncio.run(studio.aclose())
+
+
+@bot_app.command("serve")
+def bot_serve(
+    mode: Annotated[str, typer.Option("--mode", help="polling | webhook")] = "polling",
+    host: Annotated[str, typer.Option("--host", help="Bind address для webhook")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port для webhook")] = 8081,
+) -> None:
+    """Запустити тонкого Telegram-бота підписника (long-polling або webhook HTTP)."""
+    from .bot.app import create_bot_app, run_bot_polling
+
+    settings = get_settings()
+    clean_mode = mode.strip().lower()
+    if clean_mode == "polling":
+        asyncio.run(run_bot_polling(settings))
+        return
+    if clean_mode == "webhook":
+        import uvicorn
+
+        uvicorn.run(
+            create_bot_app(settings),
+            host=host,
+            port=port,
+            log_level=settings.log_level.lower(),
+        )
+        return
+    typer.echo("❌ Невідомий режим: очікується polling або webhook", err=True)
+    raise typer.Exit(code=1)
+
+
+@bot_app.command("status")
+def bot_status(
+    chat_id: Annotated[str | None, typer.Option("--chat-id", help="Фільтр за chat_id")] = None,
+) -> None:
+    """Показати стан підписників бота і активні тарифні плани."""
+    settings = get_settings()
+    store = BotSubscriberStore(settings.bot_state_path, trial_days=settings.bot_trial_days)
+    profiles = [store.get(chat_id)] if chat_id else store.list_all()
+    items = [p for p in profiles if p is not None]
+    if not items:
+        typer.echo("Підписників бота ще немає")
+        return
+    for profile in items:
+        eff = store.effective_plan(profile)
+        exp = profile.plan_expires_at or profile.trial_ends_at
+        exp_str = exp.date().isoformat() if exp else "-"
+        typer.echo(
+            f"{profile.chat_id:<14} plan={eff:<5} (raw={profile.plan}) "
+            f"until={exp_str} task={profile.active_task_id or '-'}"
+        )
+
+
+@bot_app.command("grant")
+def bot_grant(
+    chat_id: str,
+    plan: Annotated[
+        SubscriberPlan, typer.Option("--plan", help="free | trial | pro | b2b")
+    ] = "pro",
+    days: Annotated[int, typer.Option("--days", min=1, max=3650, help="Тривалість в днях")] = 30,
+) -> None:
+    """Призначити або продовжити тариф підписнику бота за chat_id."""
+    settings = get_settings()
+    store = BotSubscriberStore(settings.bot_state_path, trial_days=settings.bot_trial_days)
+    profile = store.grant_plan(chat_id, plan, days=days)
+    exp = profile.plan_expires_at or profile.trial_ends_at
+    exp_str = exp.date().isoformat() if exp else "-"
+    typer.echo(f"✅ {profile.chat_id}: plan={profile.plan} (until={exp_str})")
 
 
 @app.command()

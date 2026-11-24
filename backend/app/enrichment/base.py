@@ -23,6 +23,7 @@ class EnrichmentContext:
     run_id: str | None = None
     budget: LLMBudget | None = None
     search: Any = None
+    spec_config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def offline(self) -> bool:

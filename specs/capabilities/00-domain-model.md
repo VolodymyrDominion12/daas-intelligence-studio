@@ -3,15 +3,15 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
-| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
-| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`), `docs/03` §3.4 (`P1-07`), `docs/03` §3.7 (`P1-10`) |
-| **Статус** | as-built (`013-delivery-filters-and-digest`) |
+| **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_prozorro_winners.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`), `docs/03` §3.4 (`P1-07`), `docs/03` §3.7 (`P1-10`), `014-prozorro-winners-b2b-triggers` |
+| **Статус** | as-built (`014-prozorro-winners-b2b-triggers`) |
 
 ## 1. Сутності
 
 | Сутність | Модель | Де живе | Призначення |
 |:---|:---|:---|:---|
-| Задача | `TaskInfo` + `TaskSpec` | SQLite `tasks.spec_json` | Що збираємо: колонки, seed-и, ліміти, збагачення |
+| Задача | `TaskInfo` + `TaskSpec` (+ `AutoEnrichTrigger`) | SQLite `tasks.spec_json` | Що збираємо: колонки, seed-и, ліміти, збагачення, авто-тригер B2B |
 | Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання, ручний CSS-селектор |
 | API-джерело | `ApiSourceSpec` | у `TaskSpec.api_source` | Декларативний мапінг JSON API, курсор, пагінація |
 | Розклад | `ScheduleInfo` | SQLite `schedules` | Cron-вираз (UTC), `catch_up`, `next_run_at`, останній запуск |
@@ -128,6 +128,7 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `robots_blocked` | warning | runner | Пропущено через robots.txt |
 | `limit_reached`, `llm_limit` | warning | runner | Ліміт сторінок / LLM-викликів |
 | `selector_healed` | info | runner | Схему перегенеровано після промаху |
+| `auto_enrichment_triggered` | info | `pipeline/runner.py` | Авто-збагачення B2B-кандидатів наприкінці збору (`matched`, `attempted`, `enriched`, `min_amount`) |
 | `records_removed`, `tombstones_skipped`, `tombstones_suspicious` | info/debug/warning | runner | Tombstones (див. 08) |
 | `record_quarantined` | warning | `pipeline/runner.py` | Підозрілий запис спрямовано в карантин (`data.reason`, `data.url`) |
 | `quarantine_approved`, `quarantine_dismissed` | info | `runtime.Studio` | Підтвердження запису в датасет або відхилення з карантину (`data.item_id`) |

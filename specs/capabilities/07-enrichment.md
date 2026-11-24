@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/enrichment/base.py`, `backend/app/enrichment/registry.py`, `backend/app/enrichment/site_audit.py`, `backend/app/enrichment/tech_detect.py`, `backend/app/enrichment/domain_resolver.py`, `backend/app/enrichment/ai_column.py`, `backend/app/enrichment/dedupe.py`, `backend/app/pipeline/runner.py` (`enrich`, `_enrich_row`, `_persist_records`), `backend/app/db/sqlite_store.py` (`entity_links`), `backend/app/db/duckdb_store.py` (`get_record_revision`), `backend/app/runtime.py` (`list_duplicates`, `merge_duplicates`, `dismiss_duplicate`, `unmerge_link`) |
+| **Код** | `backend/app/enrichment/base.py`, `backend/app/enrichment/registry.py`, `backend/app/enrichment/site_audit.py`, `backend/app/enrichment/tech_detect.py`, `backend/app/enrichment/domain_resolver.py`, `backend/app/enrichment/ai_column.py`, `backend/app/enrichment/dedupe.py`, `backend/app/pipeline/runner.py` (`enrich`, `_enrich_row`, `_persist_records`, `_run_auto_enrichment`, `_matches_auto_enrich_trigger`), `backend/app/db/sqlite_store.py` (`entity_links`), `backend/app/db/duckdb_store.py` (`get_record_revision`), `backend/app/runtime.py` (`list_duplicates`, `merge_duplicates`, `dismiss_duplicate`, `unmerge_link`) |
 | **API** | `POST /api/tasks/{id}/enrich {column_keys}`, `GET /api/tasks/{id}/duplicates?threshold=88`, `POST /api/tasks/{id}/duplicates/merge`, `POST /api/tasks/{id}/duplicates/dismiss`, `POST /api/tasks/{id}/duplicates/links/{link_id}/unmerge`, `GET /api/config` (`enrichers`) |
 | **CLI** | `daas enrich <id> [--column k]`, `daas duplicates <id> [--threshold 88]`, `daas merge <id> <canon> <merged> [--policy ...]`, `daas unmerge <id> <link_id>` |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_utils.py`, `tests/test_entity_merge.py` |
-| **Джерела** | `docs/01` модуль 3 («локальний Clay»), `docs/02` §4.2, `docs/03` §3.2 (`P1-02`) |
-| **Статус** | as-built (P1-02) |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_utils.py`, `tests/test_entity_merge.py`, `tests/test_prozorro_winners.py` |
+| **Джерела** | `docs/01` модуль 3 («локальний Clay»), `docs/02` §4.2, `docs/03` §3.2 (`P1-02`), `014-prozorro-winners-b2b-triggers` |
+| **Статус** | as-built (`014-prozorro-winners-b2b-triggers`) |
 
 ## 1. Призначення
 Додати до зібраних записів те, за що платять: контакти, соцмережі, технології, сигнали наміру,
@@ -115,6 +115,20 @@ AI-колонка **ПОВИННА**: викликатися лише за до�
   `tests/test_entity_merge.py::test_merge_dismiss_and_reversible_unmerge_api`,
   `tests/test_entity_merge.py::test_out_of_order_unmerge_replays_later_merges`
 
+### REQ-ENR-012 — Послідовний waterfall для переможця та тригер авто-збагачення при зборі
+Система **ПОВИННА** забезпечувати:
+- цільовий пошук сайту за `spec_config.name_field` (наприклад, `winner_name`, з регіоном/містом) без
+  підміни замовником і безпечний пропуск, якщо цільове поле порожнє;
+- гарантований порядок `domain_resolver` → `site_audit` у `_enrich_row`, щоб знайдений у цьому ж
+  проході `website` одразу проходив аудит (`site_audit` + `tech_detect`) без повторного запуску;
+- автоматичний запуск збагачення в кінці `collect` (до снапшота, diff і доставки) для зібраних
+  записів, що задовольняють `TaskSpec.auto_enrich` (`require_fields`, `status_field`/`allowed_statuses`,
+  `min_amount`, відсутність уже заповнених збагачених полів/provenance) у межах
+  `max_records_per_run`, через `PolicyGuardFetcher`, з append-only ревізією в DuckDB і подією
+  `auto_enrichment_triggered`; збій чи блокування на окремому домені **НЕ ПОВИННІ** зривати збір.
+- **Перевірка:** `tests/test_prozorro_winners.py::test_collect_winner_trigger_resolves_domain_and_audits_site`,
+  `tests/test_prozorro_winners.py::test_winner_trigger_respects_threshold_idempotency_and_compliance`
+
 ## 4. Спостережувана поведінка / відкриті питання
 - Через `overwrite=False` повторне збагачення **не оновлює** вже заповнені значення (включно з
   AI-колонками і змінами на сайті компанії). Це захищає зібране, але робить збагачення «одноразовим».
@@ -122,4 +136,5 @@ AI-колонка **ПОВИННА**: викликатися лише за до�
 - `SourcePolicy.allowed_fields` зберігається, але не застосовується.
 
 ## 5. Прогалини
-REQ-ENR-001, REQ-ENR-005, REQ-ENR-006 — без тестів.
+REQ-ENR-001, REQ-ENR-006 — без тестів. (REQ-ENR-005 частково покрито через
+`tests/test_prozorro_winners.py::test_collect_winner_trigger_resolves_domain_and_audits_site`).

@@ -2,10 +2,10 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/playwright-sidecar/Dockerfile`, `deploy/playwright-sidecar/server.py`, `deploy/README.md` |
-| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
-| **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), `docs/05` §5 Тиждень 3, ADR-02 |
-| **Статус** | as-built (`013-delivery-filters-and-digest`) |
+| **Код** | `backend/app/config.py` (`Settings`, `Paths`), `backend/app/db/sqlite_store.py` (`MIGRATIONS`, `backup_to`, `overview`), `backend/app/storage/backup.py`, `backend/app/storage/__init__.py`, `backend/app/bot/state.py` (`BotSubscriberStore`), `backend/app/cli.py`, `backend/app/demo.py`, `backend/app/__init__.py`, `.env.example`, `Makefile`, `.github/workflows/ci.yml`, `.gitignore`, `Dockerfile`, `.dockerignore`, `docker-compose.prod.yml`, `deploy/systemd/daas-studio.service`, `deploy/caddy/Caddyfile`, `deploy/scripts/backup-and-upload.sh`, `deploy/playwright-sidecar/Dockerfile`, `deploy/playwright-sidecar/server.py`, `deploy/README.md` |
+| **Тести** | `tests/test_raw_cache_backup.py`, `tests/test_api_flow.py`, `tests/test_package_integrity.py`, `tests/test_storage.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_subscriber_bot.py`, `tests/test_quality.py`, `tests/test_deploy_ops.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/01` §2 (local-first), `docs/03` §2a (інцидент Фази 0), `docs/05` §5 Тиждень 3, ADR-02, `015-telegram-subscriber-bot` |
+| **Статус** | as-built (`015-telegram-subscriber-bot`) |
 
 ## 1. Розкладка сховища
 
@@ -13,6 +13,7 @@
 <DAAS_STORAGE_DIR, за замовчуванням <repo>/storage>/
 ├── operational.sqlite      # tasks, runs, jobs, events, ledger, registry, calibrations, calibration_history, misses, api_state, schedules, subscriptions, delivery_log, delivery_digest_queue, entity_links
 ├── analytics.duckdb        # record_versions, quarantine, current_records
+├── bot_subscribers.json    # профілі й тарифи тонкого Telegram-бота (DAAS_BOT_STATE_FILE)
 ├── raw_cache/<xx>/<sha256>.json.zst
 ├── snapshots/dataset=<slug>/version=<NNNN>/{part.parquet, manifest.json}
 ├── exports/<file> + <file>.manifest.json
@@ -29,10 +30,12 @@
 `<repo>/backend/.env`; невідомі ключі ігноруються. Кожне нове налаштування **ПОВИННО** з'являтися в
 `.env.example` з коментарем у тій самій зміні (включно з `DAAS_SCHEDULER_ENABLED`,
 `DAAS_SCHEDULER_POLL_SECONDS`, `DAAS_TELEGRAM_BOT_TOKEN`, `DAAS_DELIVERY_TIMEOUT_S`,
-`DAAS_DELIVERY_MAX_RETRIES`, `DAAS_DELIVERY_INLINE_LIMIT`, `DAAS_QUALITY_MAX_DROP_RATIO`,
-`DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`, `DAAS_EVAL_MIN_F1`, `DAAS_PROXY_URLS`, `DAAS_PROXY_STRATEGY`,
-`DAAS_PROXY_STICKY_TTL_S`, `DAAS_PROXY_COOLDOWN_S`, `DAAS_PROXY_COST_PER_GB_USD`,
-`DAAS_CIRCUIT_BREAKER_THRESHOLD`, `DAAS_CIRCUIT_BREAKER_COOLDOWN_S`,
+`DAAS_DELIVERY_MAX_RETRIES`, `DAAS_DELIVERY_INLINE_LIMIT`, `DAAS_BOT_STUDIO_URL`,
+`DAAS_BOT_STUDIO_TOKEN`, `DAAS_BOT_WEBHOOK_SECRET`, `DAAS_BOT_BILLING_SECRET`,
+`DAAS_BOT_PAYMENT_URL`, `DAAS_BOT_TRIAL_DAYS`, `DAAS_BOT_STATE_FILE`, `DAAS_BOT_POLL_TIMEOUT_S`,
+`DAAS_QUALITY_MAX_DROP_RATIO`, `DAAS_QUALITY_MIN_REQUIRED_FILL_PCT`, `DAAS_EVAL_MIN_F1`,
+`DAAS_PROXY_URLS`, `DAAS_PROXY_STRATEGY`, `DAAS_PROXY_STICKY_TTL_S`, `DAAS_PROXY_COOLDOWN_S`,
+`DAAS_PROXY_COST_PER_GB_USD`, `DAAS_CIRCUIT_BREAKER_THRESHOLD`, `DAAS_CIRCUIT_BREAKER_COOLDOWN_S`,
 `DAAS_PLAYWRIGHT_SIDECAR_URL`, `DAAS_PLAYWRIGHT_WAIT_UNTIL`, `DAAS_PLAYWRIGHT_WAIT_MS`,
 `DAAS_JS_MIN_TEXT_CHARS`). Відносний `storage_dir` — відносно кореня репо.
 - **Перевірка:** — (прогалина)
@@ -78,7 +81,7 @@
 `daas` **ПОВИНЕН** надавати: `init`, `serve [--host --port --reload]`, `demo [--serve --storage
 --port]`, `doctor`, `task create|list|show`, `schedule set|show|list|delete`,
 `notify add [--exclude --cpv --region --field --mode --digest-cron]|list|test|flush|delete`,
-`calibrate`, `collect [--pages]`, `enrich [--column]`, `snapshot`,
+`bot serve|status|grant`, `calibrate`, `collect [--pages]`, `enrich [--column]`, `snapshot`,
 `export [--format --mask/--no-mask --limit]`, `duplicates [--threshold]`, `changes`,
 `backup [--out --cache]`, `eval --task <id> --gold <path> [--min-f1]`, `proxy-status`,
 `circuit-reset <domain>`.
@@ -86,6 +89,7 @@
 - **Перевірка (частково):** `tests/test_scheduler.py::test_cli_schedule_commands` (`schedule`),
   `tests/test_delivery.py::test_cli_notify_commands` (`notify`),
   `tests/test_delivery.py::test_cli_notify_advanced_filters_and_flush` (`notify` розширені фільтри й дайджест),
+  `tests/test_subscriber_bot.py::test_bot_webhooks_polling_and_cli_commands` (`bot`),
   `tests/test_quality.py::test_eval_endpoint_and_cli_exit_codes` (`eval`),
   `tests/test_proxy_resilience.py::test_resilience_api_metrics_validation_and_cli` (`proxy-status`, `circuit-reset`);
   інші команди — прогалина

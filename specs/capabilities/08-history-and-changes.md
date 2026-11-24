@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`, `flush_subscription`, `flush_due_digests`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`, `delivery_digest_queue`) |
-| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET /api/tasks/{id}/quarantine`, `POST /api/tasks/{id}/quarantine/{item_id}/approve`, `DELETE /api/tasks/{id}/quarantine/{item_id}`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/subscriptions/{sub_id}/flush`, `POST /api/tasks/{id}/eval` |
-| **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|flush\|delete`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
-| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py` |
-| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/03` §3.7 (P1-08), `docs/05` §5 (D-01), `013-delivery-filters-and-digest` |
-| **Статус** | as-built (`013-delivery-filters-and-digest`) |
+| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`, `flush_subscription`, `flush_due_digests`), `backend/app/bot/client.py` (`StudioApiClient`, `TelegramBotClient`), `backend/app/bot/state.py` (`BotSubscriberStore`), `backend/app/bot/service.py` (`SubscriberBotService`), `backend/app/bot/app.py` (`create_bot_app`, `poll_bot_once`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`, `delivery_digest_queue`) |
+| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET /api/tasks/{id}/quarantine`, `POST /api/tasks/{id}/quarantine/{item_id}/approve`, `DELETE /api/tasks/{id}/quarantine/{item_id}`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/subscriptions/{sub_id}/flush`, `POST /api/tasks/{id}/eval`, бот `POST /telegram/webhook`, `POST /billing/webhook` |
+| **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|flush\|delete`, `daas bot serve\|status\|grant`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
+| **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_prozorro_winners.py`, `tests/test_subscriber_bot.py`, `tests/test_quality.py`, `tests/test_quarantine.py` |
+| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/03` §3.7 (P1-08), `docs/05` §5 (D-01), `013-delivery-filters-and-digest`, `014-prozorro-winners-b2b-triggers`, `015-telegram-subscriber-bot` |
+| **Статус** | as-built (`015-telegram-subscriber-bot`) |
 
 ## 1. Призначення
 Історія, яку конкурент не спарсить заднім числом: append-only версії кожного запису, поточний стан,
@@ -220,6 +220,49 @@ Tombstone **ПОВИНЕН** ставитися лише якщо поточна
   (`=`, `+`, `-`, `@`); при збої `sendDocument` після успішного `sendMessage` текст уже доставлених змін
   фіксується в `delivery_log`, а про помилку вкладення пишеться подія `delivery_failed`.
 - **Перевірка:** `tests/test_delivery.py::test_telegram_formatting_and_xlsx_attachment_over_limit`
+
+### REQ-DEL-007 — B2B-контекст переможця та збагачених контактів у доставці
+Під час формування повідомлень доставки (`telegram` та `webhook` / `xlsx`) система **ПОВИННА**:
+- брати суму запису для фільтрів (`min_amount` / `max_amount`) і форматування з `award_amount`
+  (за наявності) або `amount`/`price`;
+- включати у Telegram-повідомлення назву переможця, ЄДРПОУ (за наявності), знайдений сайт,
+  бізнес-email, телефон і перші позиції техстеку, безумовно маскуючи будь-які колонки
+  `pii="personal"` і залишаючи відкритими `pii="business_contact"`.
+- **Перевірка:** `tests/test_prozorro_winners.py::test_winner_delivery_formats_contacts_and_protects_personal_pii`
+
+### REQ-DEL-008 — Тонкий Telegram-бот підписника поверх REST API студії
+Окремий сервіс Telegram-бота **ПОВИНЕН** взаємодіяти зі студією виключно через HTTP REST API із
+`Authorization: Bearer` (без прямого доступу до DuckDB чи операційної SQLite), строго ізолювати
+кожен `chat_id` (лише підписки з `channel="telegram"` і `target == str(chat_id)`), підтримувати
+команди й inline callback-кнопки та повертати коректні повідомлення про помилку без витоку токенів
+при недоступності API студії.
+- **Перевірка:** `tests/test_subscriber_bot.py::test_bot_uses_studio_rest_api_and_isolates_chat_ids`
+
+### REQ-DEL-009 — 7-денний Free Trial, тарифні обмеження (`free`/`trial`/`pro`/`b2b`) та `/upgrade`
+Сервіс бота **ПОВИНЕН** зберігати профілі підписників у персистентному JSON-файлі (`DAAS_BOT_STATE_FILE`):
+- при першому `/start` автоматично активується ознайомчий `trial` на `DAAS_BOT_TRIAL_DAYS` днів (`7`);
+- користувачі з активним `trial`/`pro`/`b2b` можуть перемикатися на `delivery_mode="instant"`;
+- план `free` або протермінований тариф обмежується `digest_daily` із підказкою `/upgrade`;
+- `/upgrade` показує тарифи та (за наявності `DAAS_BOT_PAYMENT_URL`) безпечне HTTP/HTTPS посилання з `chat_id`.
+- **Перевірка:** `tests/test_subscriber_bot.py::test_bot_free_trial_upgrade_and_plan_enforcement`
+
+### REQ-DEL-010 — Самообслуговування фільтрів, пауза, відновлення та ручний дайджест у боті
+Бот **ПОВИНЕН** підтримувати вибір задачі (`/tasks`, `/select <номер|id>`, callback-кнопки),
+налаштування фільтрів (`/cpv`, `/region`, `/budget`, `/keywords`, `/exclude`, `/mode instant|digest`),
+керування станом (`/status`, `/pause`, `/resume`, `/flush`) через REST API студії та зрозумілі
+повідомлення українською при невалідних аргументах або необраній задачі.
+- **Перевірка:** `tests/test_subscriber_bot.py::test_bot_filter_setup_pause_resume_and_flush`
+
+### REQ-DEL-011 — Webhook/Polling режим бота, захищений платіжний webhook, конфігурація та CLI
+Система **ПОВИННА** надавати:
+- HTTP-додаток бота з `GET /health`, `POST /telegram/webhook` (перевірка `X-Telegram-Bot-Api-Secret-Token`
+  при заданому `DAAS_BOT_WEBHOOK_SECRET`, інакше `401`) та `POST /billing/webhook` (HMAC/секрет через
+  `X-Billing-Secret` або `X-Signature: sha256=...`, `503` при вимкненому `DAAS_BOT_BILLING_SECRET`, `401`
+  при невірному підписі);
+- long-polling цикл `poll_bot_once` / `run_bot_polling`;
+- CLI-підгрупу `daas bot serve [--mode polling|webhook --host --port]`, `daas bot status [--chat-id]`,
+  `daas bot grant <chat_id> --plan <free|trial|pro|b2b> [--days]`.
+- **Перевірка:** `tests/test_subscriber_bot.py::test_bot_webhooks_polling_and_cli_commands`
 
 ## 8. Вимоги — якість даних та офлайн gold-set eval (`P1-01`)
 

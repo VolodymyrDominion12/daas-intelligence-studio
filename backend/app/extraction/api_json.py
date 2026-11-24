@@ -10,10 +10,11 @@ from ..models import ApiSourceSpec, ExtractedRecord, Provenance, TaskSpec
 from ..utils import coerce_value, hash_text, record_key_for, utcnow
 
 _INT_RE = re.compile(r"^\d+$")
+_FILTER_RE = re.compile(r"^([^\[\]]+)\[([^=\[\]]+)=([^\[\]]*)\]$")
 
 
 def _walk_path(node: Any, path: str) -> Any:
-    """Resolve dot-separated path with optional integer list indices and ``|`` fallbacks."""
+    """Resolve dot-separated path with optional indices, ``[field=value]`` filters, and ``|`` fallbacks."""
     if not path:
         return node
     for branch in path.split("|"):
@@ -23,7 +24,31 @@ def _walk_path(node: Any, path: str) -> Any:
         cur = node
         ok = True
         for part in candidate.split("."):
-            if isinstance(cur, dict):
+            filt = _FILTER_RE.match(part)
+            if filt is not None:
+                list_key, cond_key, cond_val = filt.groups()
+                if not isinstance(cur, dict) or list_key not in cur:
+                    ok = False
+                    break
+                items = cur[list_key]
+                if not isinstance(items, list):
+                    ok = False
+                    break
+                target = cond_val.strip().casefold()
+                matched = next(
+                    (
+                        elem
+                        for elem in items
+                        if isinstance(elem, dict)
+                        and str(elem.get(cond_key) or "").strip().casefold() == target
+                    ),
+                    None,
+                )
+                if matched is None:
+                    ok = False
+                    break
+                cur = matched
+            elif isinstance(cur, dict):
                 if part in cur:
                     cur = cur[part]
                 else:

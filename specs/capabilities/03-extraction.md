@@ -3,9 +3,9 @@
 | | |
 |:---|:---|
 | **Код** | `backend/app/extraction/engine.py`, `backend/app/extraction/jsonld.py`, `backend/app/extraction/css.py`, `backend/app/extraction/api_json.py`, `backend/app/extraction/llm_extractor.py`, `backend/app/extraction/base.py`, `backend/app/extraction/learner.py` (`fill_from_text`, `coerce_any`), `backend/app/scraping/page.py` (`extract_json_ld`) |
-| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py`, `tests/test_open_api_source.py`, `tests/test_quarantine.py` |
-| **Джерела** | ADR-06, `docs/02` §3 |
-| **Статус** | as-built (P1-08) |
+| **Тести** | `tests/test_extraction.py`, `tests/test_learner.py`, `tests/test_open_api_source.py`, `tests/test_prozorro_winners.py`, `tests/test_quarantine.py` |
+| **Джерела** | ADR-06, `docs/02` §3, `014-prozorro-winners-b2b-triggers` |
+| **Статус** | as-built (`014-prozorro-winners-b2b-triggers`) |
 
 ## 1. Призначення
 Один рушій для калібрування і масового збору: детерміновані стратегії (JSON-LD, CSS) спершу, LLM —
@@ -88,6 +88,13 @@ LLM-екстрактор **ПОВИНЕН**: передавати сторінк
 виставляти стабільний ключ `api:<id>` та `Provenance(method="api_json", confidence=0.98, verified=True)`.
 На невалідному JSON повертаються 0 записів і попередження без падіння прогону.
 - **Перевірка:** `tests/test_open_api_source.py::test_json_extractor_maps_fields_and_handles_broken_json`
+
+### REQ-EXT-011 — Фільтрований вибір елемента масиву в JSON API (`key[field=value]`)
+Декларативний екстрактор JSON API **ПОВИНЕН** підтримувати фільтрований вибір першого відповідного
+об'єкта зі списку у форматі `шлях[поле=значення]` (регістронезалежне порівняння рядкового значення
+поля), сумісний із резервними гілками через `|`. Якщо жоден елемент не підходить і резервної гілки
+немає, поле безпечно лишається порожнім без винятку.
+- **Перевірка:** `tests/test_prozorro_winners.py::test_json_path_filtered_award_selection`
 
 ## 4. Спостережувана поведінка / відкриті питання
 - (немає)

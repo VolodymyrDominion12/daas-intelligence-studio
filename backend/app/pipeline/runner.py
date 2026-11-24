@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..compliance import effective_policy, login_violation, redact_url
@@ -22,6 +23,7 @@ from ..extraction.learner import apply_manual_selectors, learn_schema, schema_si
 from ..llm.base import LLMBudget
 from ..llm.router import LLMRouter
 from ..models import (
+    AutoEnrichTrigger,
     CssField,
     CssSchema,
     ExtractedRecord,
@@ -35,7 +37,7 @@ from ..scraping.fetcher import Fetcher
 from ..scraping.page import extract_links
 from ..scraping.resilience import DomainCircuitBreaker
 from ..storage.raw_cache import RawCache
-from ..utils import iso, normalize_domain, unique, utcnow
+from ..utils import iso, normalize_domain, parse_number, unique, utcnow
 from .calibration import Calibrator
 from .quality import evaluate_dataset_quality
 
@@ -570,6 +572,7 @@ class PipelineRunner:
                     key: value.model_dump(mode="json")
                     for key, value in record.provenance.items()
                 },
+                "source_url": record.source_url,
             }
 
         if persisted > 0:
@@ -914,7 +917,7 @@ class PipelineRunner:
             await self._notify_run_failed(task_id, run_id, exc)
             raise
 
-    async def _enrich_row(self, row: dict, ctx: RunContext, context: EnrichmentContext, targets) -> None:
+    async def _enrich_row(self, row: dict, ctx: RunContext, context: EnrichmentContext, targets) -> bool:
         payload = dict(row.get("payload") or {})
         provenance: dict[str, Provenance] = {}
         for key, value in (row.get("provenance") or {}).items():
@@ -924,7 +927,11 @@ class PipelineRunner:
                 continue
         changed = False
 
-        for enrichment in ctx.spec.enrichment:
+        ordered_enrichments = sorted(
+            ctx.spec.enrichment,
+            key=lambda item: (0 if item.enricher == "domain_resolver" else 1),
+        )
+        for enrichment in ordered_enrichments:
             if not enrichment.enabled:
                 continue
             enricher = self.registry.get(enrichment.enricher)
@@ -940,7 +947,8 @@ class PipelineRunner:
             missing = [key for key in produced if payload.get(key) in (None, "", [])]
             if not missing:
                 continue
-            result = await enricher.run(payload, context)
+            step_context = replace(context, spec_config=dict(enrichment.config or {}))
+            result = await enricher.run(payload, step_context)
             if result.skipped or not result.values:
                 continue
             before = dict(payload)
@@ -977,7 +985,7 @@ class PipelineRunner:
             ctx.stats.llm_usd = ctx.budget.spent_usd
 
         if not changed:
-            return
+            return False
         record = ExtractedRecord(
             record_key=row["record_key"],
             payload=payload,
@@ -987,6 +995,142 @@ class PipelineRunner:
         )
         self.analytics.append_records(ctx.dataset_id, ctx.version, ctx.run_id, [record])
         ctx.stats.records_updated += 1
+        return True
+
+    @staticmethod
+    def _matches_auto_enrich_trigger(
+        payload: dict[str, Any], trigger: AutoEnrichTrigger
+    ) -> bool:
+        for req in trigger.require_fields:
+            if payload.get(req) in (None, "", [], {}):
+                return False
+        if trigger.status_field and trigger.allowed_statuses:
+            status_val = str(payload.get(trigger.status_field) or "").strip().casefold()
+            allowed = {item.strip().casefold() for item in trigger.allowed_statuses if item.strip()}
+            if allowed and status_val not in allowed:
+                return False
+        if trigger.min_amount is not None and trigger.min_amount > 0:
+            amount: float | None = None
+            for field_key in trigger.amount_fields:
+                raw = payload.get(field_key)
+                if raw in (None, ""):
+                    continue
+                parsed = float(raw) if isinstance(raw, (int, float)) else parse_number(str(raw))
+                if parsed is not None:
+                    amount = parsed
+                    break
+            if amount is None or amount < trigger.min_amount:
+                return False
+        return True
+
+    async def _run_auto_enrichment(self, ctx: RunContext) -> None:
+        trigger = ctx.spec.auto_enrich
+        if trigger is None or not trigger.enabled or not ctx.seen_keys:
+            return
+        targets = [
+            column
+            for column in ctx.spec.columns
+            if column.method == "enrichment" or column.is_ai
+        ]
+        if not targets:
+            return
+
+        enrich_cols = [column.key for column in targets if not column.is_ai]
+        audit_keys = [key for key in enrich_cols if key != "website"]
+        ai_keys = [column.key for column in targets if column.is_ai]
+        has_domain_resolver = any(
+            item.enricher == "domain_resolver" and item.enabled for item in ctx.spec.enrichment
+        )
+        has_site_audit = any(
+            item.enricher == "site_audit" and item.enabled for item in ctx.spec.enrichment
+        )
+
+        candidates: list[dict[str, Any]] = []
+        for record_key, entry in ctx.existing.items():
+            if record_key not in ctx.seen_keys:
+                continue
+            payload = dict(entry.get("payload") or {})
+            provenance = entry.get("provenance") or {}
+            if not self._matches_auto_enrich_trigger(payload, trigger):
+                continue
+
+            needs_domain = (
+                has_domain_resolver
+                and "website" in enrich_cols
+                and payload.get("website") in (None, "", [])
+            )
+            has_audit_prov = any(
+                isinstance(provenance.get(key), dict)
+                and provenance[key].get("method") == "enrichment"
+                for key in audit_keys
+            )
+            has_audit_values = any(
+                payload.get(key) not in (None, "", [], {}) for key in audit_keys
+            )
+            needs_audit = (
+                has_site_audit
+                and bool(audit_keys)
+                and not has_audit_prov
+                and not has_audit_values
+                and (needs_domain or payload.get("website") not in (None, "", []))
+            )
+            needs_ai = bool(ai_keys) and any(
+                payload.get(key) in (None, "", [], {}) for key in ai_keys
+            )
+            if not (needs_domain or needs_audit or needs_ai):
+                continue
+            candidates.append(
+                {
+                    "record_key": record_key,
+                    "payload": payload,
+                    "provenance": provenance,
+                    "source_url": str(entry.get("source_url") or ""),
+                }
+            )
+
+        if not candidates:
+            return
+
+        batch = candidates[: trigger.max_records_per_run]
+        context = EnrichmentContext(
+            settings=self.settings,
+            fetcher=self.fetcher,
+            router=self.router,
+            store=self.store,
+            task_id=ctx.task.id,
+            run_id=ctx.run_id,
+            budget=ctx.budget,
+            search=self.search,
+        )
+        semaphore = asyncio.Semaphore(self.settings.max_enrich_concurrency)
+
+        async def process(row: dict[str, Any]) -> bool:
+            async with semaphore:
+                try:
+                    return await self._enrich_row(row, ctx, context, targets)
+                except Exception as exc:  # noqa: BLE001 - auto-enrichment must not fail collect
+                    logger.warning(
+                        "auto-enrichment failed for %s: %s",
+                        row.get("record_key"),
+                        exc,
+                    )
+                    return False
+
+        results = await asyncio.gather(*[process(row) for row in batch])
+        enriched_count = sum(1 for item in results if item)
+        self.store.add_event(
+            ctx.task.id,
+            "auto_enrichment_triggered",
+            f"Авто-збагачення B2B: {enriched_count}/{len(batch)} записів оновлено",
+            run_id=ctx.run_id,
+            level="info",
+            data={
+                "matched": len(candidates),
+                "attempted": len(batch),
+                "enriched": enriched_count,
+                "min_amount": trigger.min_amount,
+            },
+        )
 
     # ------------------------------------------------------------------
     # snapshots / change detection
@@ -1027,6 +1171,8 @@ class PipelineRunner:
     async def _finish_dataset(
         self, ctx: RunContext, *, status_override: str | None, diff_only: bool = False
     ) -> None:
+        if not diff_only:
+            await self._run_auto_enrichment(ctx)
         dataset_id = ctx.dataset_id
         row_count = self.analytics.count_records(dataset_id)
         changes = await self._write_snapshot_and_diff(ctx, ctx.version)

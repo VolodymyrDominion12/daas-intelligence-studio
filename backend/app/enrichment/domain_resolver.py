@@ -25,7 +25,9 @@ class DomainResolverEnricher(Enricher):
     requires = ["name"]
 
     def applies(self, payload: dict[str, Any]) -> bool:
-        return not payload.get("website") and bool(payload.get("name"))
+        return not payload.get("website") and bool(
+            payload.get("winner_name") or payload.get("name")
+        )
 
     async def run(self, payload: dict[str, Any], ctx: EnrichmentContext) -> EnrichmentResult:
         if ctx.search is None:
@@ -33,8 +35,24 @@ class DomainResolverEnricher(Enricher):
                 skipped=True,
                 notes=["domain_resolver needs a search provider (DAAS_SEARXNG_URL)"],
             )
-        name = str(payload.get("name") or "").strip()
-        city = str(payload.get("city") or "").strip()
+        name_field = str((ctx.spec_config or {}).get("name_field") or "").strip()
+        if name_field:
+            name = str(payload.get(name_field) or "").strip()
+            if not name:
+                return EnrichmentResult(skipped=True, notes=[f"missing {name_field}"])
+        else:
+            name = str(payload.get("winner_name") or payload.get("name") or "").strip()
+        city_fields = (ctx.spec_config or {}).get("city_fields") or [
+            "winner_city",
+            "city",
+            "region",
+        ]
+        city = ""
+        for field in city_fields:
+            candidate = str(payload.get(field) or "").strip()
+            if candidate:
+                city = candidate
+                break
         if not name:
             return EnrichmentResult(skipped=True, notes=["no name"])
         query = f"{name} {city} офіційний сайт".strip()

@@ -128,6 +128,16 @@ class Settings(BaseSettings):
     delivery_max_retries: int = Field(default=3, ge=1, le=10)
     delivery_inline_limit: int = Field(default=10, ge=1, le=50)
 
+    # --- subscriber bot (SDD 015) -----------------------------------------
+    bot_studio_url: str = "http://127.0.0.1:8000"
+    bot_studio_token: str | None = None
+    bot_webhook_secret: str | None = None
+    bot_billing_secret: str | None = None
+    bot_payment_url: str | None = None
+    bot_trial_days: int = Field(default=7, ge=0, le=365)
+    bot_state_file: str = "bot_subscribers.json"
+    bot_poll_timeout_s: float = Field(default=25.0, ge=1.0, le=120.0)
+
     # --- quality & eval (P1-01) -------------------------------------------
     quality_max_drop_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
     quality_min_required_fill_pct: float = Field(default=80.0, ge=0.0, le=100.0)
@@ -147,6 +157,11 @@ class Settings(BaseSettings):
         raw = Path(self.storage_dir).expanduser()
         root = raw if raw.is_absolute() else PROJECT_ROOT / raw
         return Paths(root.resolve())
+
+    @property
+    def bot_state_path(self) -> Path:
+        raw = Path(self.bot_state_file or "bot_subscribers.json").expanduser()
+        return raw.resolve() if raw.is_absolute() else (self.paths.root / raw).resolve()
 
     @property
     def cors_origin_list(self) -> list[str]:

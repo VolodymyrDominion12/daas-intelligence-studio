@@ -182,6 +182,20 @@ class ApiSourceSpec(BaseModel):
         return cleaned
 
 
+class AutoEnrichTrigger(BaseModel):
+    """Rule for automatically enriching qualifying records at the end of a collect run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    min_amount: float | None = Field(default=None, ge=0.0)
+    amount_fields: list[str] = Field(default_factory=lambda: ["award_amount", "amount", "price"])
+    require_fields: list[str] = Field(default_factory=lambda: ["winner_name"])
+    status_field: str | None = "award_status"
+    allowed_statuses: list[str] = Field(default_factory=lambda: ["active"])
+    max_records_per_run: int = Field(default=20, ge=1, le=200)
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -194,6 +208,7 @@ class TaskSpec(BaseModel):
     extraction: Literal["auto", "json_ld", "css", "llm", "api_json"] = "auto"
     api_source: ApiSourceSpec | None = None
     enrichment: list[EnrichmentSpec] = Field(default_factory=list)
+    auto_enrich: AutoEnrichTrigger | None = None
     limits: Limits = Field(default_factory=Limits)
     rationale: str = ""
     assumptions: list[str] = Field(default_factory=list)

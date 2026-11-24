@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import re
 
-from .models import ApiSourceSpec, EnrichmentSpec, FieldSpec, Limits, TaskSpec
+from .models import (
+    ApiSourceSpec,
+    AutoEnrichTrigger,
+    EnrichmentSpec,
+    FieldSpec,
+    Limits,
+    TaskSpec,
+)
+from .utils import parse_number
 
 
 def col(
@@ -243,6 +251,72 @@ def _is_openprocurement_api(prompt: str, seeds: list[str]) -> bool:
     return has_prozorro and has_api
 
 
+def _is_openprocurement_winners_api(prompt: str, seeds: list[str]) -> bool:
+    if not _is_openprocurement_api(prompt, seeds):
+        return False
+    lowered = (prompt or "").casefold()
+    return any(
+        token in lowered
+        for token in (
+            "перемож",
+            "winner",
+            "award",
+            "авард",
+            "постачальник",
+            "субпідряд",
+            "b2b",
+            "аудит їх сайт",
+            "аудит сайт",
+            "site_audit",
+        )
+    )
+
+
+def _parse_amount_threshold(prompt: str, *, default: float = 1_000_000.0) -> float:
+    lowered = (prompt or "").casefold()
+    if any(token in lowered for token in ("без порог", "усіх сум", "всіх сум")):
+        return 0.0
+    match = re.search(
+        r"(?:від|понад|більше|>=?)\s*([\d\s.,]+)\s*(млн|м\b|тис|к\b|k\b)?",
+        lowered,
+    )
+    if not match:
+        return default
+    raw_num, unit = match.groups()
+    num = parse_number(raw_num)
+    if num is None or num < 0:
+        return default
+    if unit and unit.startswith(("млн", "м")):
+        return float(num * 1_000_000)
+    if unit and unit.startswith(("тис", "к", "k")):
+        return float(num * 1_000)
+    return float(num)
+
+
+def _openprocurement_winners_columns() -> list[FieldSpec]:
+    return [
+        col("tender_id", "ID закупівлі / лота", method="api_json"),
+        col("title", "Предмет закупівлі", method="api_json"),
+        col("winner_name", "Переможець / постачальник", method="api_json"),
+        col("winner_edrpou", "ЄДРПОУ переможця", method="api_json"),
+        col("award_amount", "Сума присудження", "number", method="api_json"),
+        col("currency", "Валюта", method="api_json"),
+        col("award_status", "Статус присудження", method="api_json"),
+        col("award_date", "Дата рішення", "datetime", method="api_json"),
+        col("name", "Замовник", method="api_json"),
+        col("cpv", "Код CPV", method="api_json"),
+        col("region", "Регіон", method="api_json"),
+        col("status", "Статус тендера", method="api_json"),
+        col("modified_at", "Оновлено", "datetime", method="api_json"),
+        col("url", "Посилання", "url", method="api_json"),
+        col("website", "Сайт переможця", "url", method="enrichment"),
+        col("email", "Email переможця", "email", method="enrichment", pii="business_contact"),
+        col("phone", "Телефон переможця", "phone", method="enrichment", pii="business_contact"),
+        col("socials", "Соцмережі", "json", method="enrichment", pii="business_contact"),
+        col("tech_stack", "Технології сайту", "array", method="enrichment"),
+    ]
+
+
 def _default_openprocurement_source(seeds: list[str]) -> ApiSourceSpec:
     seed = (seeds[0] if seeds else "").strip().rstrip("/")
     base = seed.split("?", 1)[0] if seed else "https://public.api.openprocurement.org/api/2.5/tenders"
@@ -277,6 +351,63 @@ def _default_openprocurement_source(seeds: list[str]) -> ApiSourceSpec:
     )
 
 
+def _openprocurement_winners_source(seeds: list[str]) -> ApiSourceSpec:
+    base_spec = _default_openprocurement_source(seeds)
+    return base_spec.model_copy(
+        update={
+            "field_map": {
+                "tender_id": "tenderID|auctionID|id",
+                "title": "title",
+                "winner_name": (
+                    "awards[status=active].suppliers.0.name"
+                    "|awards[status=pending].suppliers.0.name"
+                    "|awards.0.suppliers.0.name"
+                ),
+                "winner_edrpou": (
+                    "awards[status=active].suppliers.0.identifier.id"
+                    "|awards[status=pending].suppliers.0.identifier.id"
+                    "|awards.0.suppliers.0.identifier.id"
+                ),
+                "award_amount": (
+                    "awards[status=active].value.amount"
+                    "|awards[status=pending].value.amount"
+                    "|awards.0.value.amount"
+                    "|value.amount"
+                ),
+                "currency": (
+                    "awards[status=active].value.currency"
+                    "|awards.0.value.currency"
+                    "|value.currency"
+                ),
+                "award_status": (
+                    "awards[status=active].status"
+                    "|awards[status=pending].status"
+                    "|awards.0.status"
+                ),
+                "award_date": (
+                    "awards[status=active].date"
+                    "|awards[status=pending].date"
+                    "|awards.0.date"
+                ),
+                "name": "procuringEntity.name",
+                "cpv": "items.0.classification.id",
+                "region": (
+                    "awards[status=active].suppliers.0.address.region"
+                    "|awards.0.suppliers.0.address.region"
+                    "|procuringEntity.address.region"
+                    "|items.0.deliveryAddress.region"
+                ),
+                "status": "status",
+                "modified_at": "dateModified",
+                "website": (
+                    "awards[status=active].suppliers.0.contactPoint.url"
+                    "|awards.0.suppliers.0.contactPoint.url"
+                ),
+            }
+        }
+    )
+
+
 def build_spec(
     prompt: str,
     seeds: list[str],
@@ -287,6 +418,55 @@ def build_spec(
     max_depth: int,
     api_source: ApiSourceSpec | None = None,
 ) -> TaskSpec:
+    if api_source is None and _is_openprocurement_winners_api(prompt, seeds):
+        api_source = _openprocurement_winners_source(seeds)
+        columns = _openprocurement_winners_columns()
+        title = _derive_title(prompt) or "Prozorro: переможці (B2B)"
+        threshold = _parse_amount_threshold(prompt, default=1_000_000.0)
+        return TaskSpec(
+            title=title[:60],
+            prompt=prompt,
+            entity="tender",
+            columns=columns,
+            seeds=seeds,
+            extraction="api_json",
+            api_source=api_source,
+            enrichment=[
+                EnrichmentSpec(
+                    enricher="domain_resolver",
+                    fields=["website"],
+                    config={"name_field": "winner_name", "city_fields": ["region", "city"]},
+                ),
+                EnrichmentSpec(
+                    enricher="site_audit",
+                    fields=["email", "phone", "socials", "tech_stack"],
+                ),
+            ],
+            auto_enrich=AutoEnrichTrigger(
+                enabled=True,
+                min_amount=threshold,
+                amount_fields=["award_amount", "amount"],
+                require_fields=["winner_name"],
+                status_field="award_status",
+                allowed_statuses=["active"],
+                max_records_per_run=20,
+            ),
+            limits=Limits(
+                max_pages=max_pages,
+                max_depth=0,
+                budget_usd=budget_usd,
+                sample_size=sample_size,
+            ),
+            rationale=(
+                "Офлайн B2B-профіль Prozorro Переможці: витягування постачальників-переможців "
+                "та авто-аудит їхніх сайтів і контактів при перевищенні порогу суми."
+            ),
+            assumptions=[
+                "Використано декларативний JSON-мапінг OpenProcurement (awards) без LLM.",
+                "Контакти переможця мають клас business_contact; персональних PII немає.",
+            ],
+        )
+
     if api_source is None and _is_openprocurement_api(prompt, seeds):
         api_source = _default_openprocurement_source(seeds)
         columns = _openprocurement_columns()

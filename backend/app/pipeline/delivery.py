@@ -55,12 +55,12 @@ def _sanitize_change(change: ChangeEvent | dict[str, Any], personal: set[str]) -
 
 def _extract_amount(change: ChangeEvent, payload: dict[str, Any] | None) -> float | None:
     if payload:
-        for key in ("amount", "price", "value"):
+        for key in ("award_amount", "amount", "price", "value"):
             if payload.get(key) is not None:
                 parsed = parse_number(payload[key])
                 if parsed is not None:
                     return parsed
-    if change.field in {"amount", "price"} and change.new is not None:
+    if change.field in {"award_amount", "amount", "price"} and change.new is not None:
         return parse_number(change.new)
     return None
 
@@ -210,7 +210,18 @@ def _format_telegram_delta(
         rec = records_by_key.get(key) or {}
         headline = str(rec.get("title") or rec.get("name") or key)[:120]
         detail = f"\n{kind}: <b>{html.escape(headline)}</b>"
-        amount = rec.get("amount") if rec.get("amount") is not None else rec.get("price")
+        winner_name = rec.get("winner_name")
+        if winner_name:
+            edrpou = rec.get("winner_edrpou")
+            edrpou_str = f" (ЄДРПОУ {html.escape(str(edrpou))})" if edrpou else ""
+            detail += f" · 🏆 {html.escape(str(winner_name))}{edrpou_str}"
+        amount = (
+            rec.get("award_amount")
+            if rec.get("award_amount") is not None
+            else rec.get("amount")
+            if rec.get("amount") is not None
+            else rec.get("price")
+        )
         if amount is not None:
             detail += f" · {html.escape(_format_amount_str(amount, rec.get('currency')))}"
         region_val = rec.get("region") or rec.get("city")
@@ -222,6 +233,15 @@ def _format_telegram_delta(
                 ", ".join(str(x) for x in cpv_val) if isinstance(cpv_val, list) else str(cpv_val)
             )
             detail += f" · CPV {html.escape(cpv_text)}"
+        if rec.get("website"):
+            detail += f" · 🌐 {html.escape(str(rec['website']))}"
+        if rec.get("email"):
+            detail += f" · ✉️ {html.escape(str(rec['email']))}"
+        if rec.get("phone"):
+            detail += f" · 📞 {html.escape(str(rec['phone']))}"
+        tech_val = rec.get("tech_stack")
+        if isinstance(tech_val, list) and tech_val:
+            detail += f" · ⚙️ {html.escape(', '.join(str(t) for t in tech_val[:3]))}"
         if item.get("field"):
             detail += (
                 f" ({html.escape(str(item['field']))}: "

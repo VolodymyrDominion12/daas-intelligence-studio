@@ -252,6 +252,7 @@ class Studio:
     @staticmethod
     def _attach_enricher_to_spec(spec: TaskSpec, field: FieldSpec) -> None:
         mapping = {
+            "website": "domain_resolver",
             "email": "site_audit",
             "phone": "site_audit",
             "tech_stack": "site_audit",

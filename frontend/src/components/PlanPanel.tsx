@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { fmtNumber, piiLabel } from '../format'
-import type { EnricherInfo, FieldSpec, TaskInfo, ToastMessage } from '../types'
+import type { AutoEnrichTrigger, EnricherInfo, FieldSpec, TaskInfo, ToastMessage } from '../types'
 
 interface Props {
   task: TaskInfo
@@ -93,6 +93,16 @@ const slugKey = (title: string): string => {
     : `col_${Date.now().toString(36).slice(-5)}`
 }
 
+const defaultTrigger = (enabled = false): AutoEnrichTrigger => ({
+  enabled,
+  min_amount: 1_000_000,
+  amount_fields: ['award_amount', 'amount', 'price'],
+  require_fields: ['winner_name'],
+  status_field: 'award_status',
+  allowed_statuses: ['active'],
+  max_records_per_run: 20,
+})
+
 export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Props) {
   const spec = task.spec
   const [showAddForm, setShowAddForm] = useState(false)
@@ -103,6 +113,15 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
   const [seedsDraft, setSeedsDraft] = useState(spec.seeds.join('\n'))
   const [limits, setLimits] = useState({ ...spec.limits })
   const [editingSeeds, setEditingSeeds] = useState(false)
+  const [autoEnrich, setAutoEnrich] = useState<AutoEnrichTrigger>(() =>
+    spec.auto_enrich ? structuredClone(spec.auto_enrich) : defaultTrigger(false),
+  )
+
+  useEffect(() => {
+    setSeedsDraft(spec.seeds.join('\n'))
+    setLimits({ ...spec.limits })
+    setAutoEnrich(spec.auto_enrich ? structuredClone(spec.auto_enrich) : defaultTrigger(false))
+  }, [task.id, spec])
 
   const run = async (action: () => Promise<unknown>, message: string) => {
     setBusy(true)
@@ -237,6 +256,23 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
     run(async () => {
       await api.updateLimits(task.id, limits)
     }, 'Ліміти оновлено')
+
+  const saveAutoEnrich = () =>
+    run(async () => {
+      const next = structuredClone(spec)
+      next.auto_enrich = {
+        ...autoEnrich,
+        min_amount:
+          autoEnrich.min_amount !== null && autoEnrich.min_amount >= 0
+            ? autoEnrich.min_amount
+            : 0,
+        max_records_per_run: Math.min(
+          200,
+          Math.max(1, Math.round(autoEnrich.max_records_per_run || 20)),
+        ),
+      }
+      await api.updateTask(task.id, { spec: next })
+    }, 'Тригер авто-збагачення збережено')
 
   const enricherTitle = (key: string) =>
     enrichers.find((enricher) => enricher.key === key)?.title ?? key
@@ -812,6 +848,63 @@ export function PlanPanel({ task, quality, enrichers, onRefresh, onToast }: Prop
               </li>
             ))}
           </ul>
+          <div className="divider" />
+          <div className="card-head">
+            <h4 className="sub-title">Тригер авто-збагачення (B2B)</h4>
+            <span className={`chip ${autoEnrich.enabled ? 'chip--yes' : 'chip--muted'}`}>
+              {autoEnrich.enabled ? 'увімкнено' : 'вимкнено'}
+            </span>
+          </div>
+          <label className="checkbox-inline">
+            <input
+              type="checkbox"
+              checked={autoEnrich.enabled}
+              onChange={(event) =>
+                setAutoEnrich({ ...autoEnrich, enabled: event.target.checked })
+              }
+            />
+            <span>Автоматично шукати сайт і робити аудит під час збору</span>
+          </label>
+          <div className="form-row">
+            <label className="field field--small">
+              <span className="field-label">Мін. сума (поріг)</span>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                step={50000}
+                value={autoEnrich.min_amount ?? 0}
+                onChange={(event) =>
+                  setAutoEnrich({
+                    ...autoEnrich,
+                    min_amount: Math.max(0, Number(event.target.value) || 0),
+                  })
+                }
+              />
+            </label>
+            <label className="field field--small">
+              <span className="field-label">Ліміт / прогін</span>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={200}
+                value={autoEnrich.max_records_per_run}
+                onChange={(event) =>
+                  setAutoEnrich({
+                    ...autoEnrich,
+                    max_records_per_run: Math.min(200, Math.max(1, Number(event.target.value) || 1)),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="form-actions">
+            <button className="btn" onClick={saveAutoEnrich} disabled={busy}>
+              {busy ? 'Збереження…' : 'Зберегти тригер'}
+            </button>
+          </div>
+
           <div className="divider" />
           <h4 className="sub-title">Як працює</h4>
           <ol className="step-list">

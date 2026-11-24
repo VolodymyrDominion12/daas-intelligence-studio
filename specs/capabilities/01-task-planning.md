@@ -5,9 +5,9 @@
 | **Код** | `backend/app/pipeline/planner.py`, `backend/app/presets.py`, `backend/app/discovery.py`, `backend/app/llm/prompts.py` (`PLANNER_SYSTEM`), `backend/app/runtime.py` (`Studio.create_task`, `update_task`, `update_column`, `reorder_columns`) |
 | **API** | `POST /api/tasks`, `PATCH /api/tasks/{id}`, `PATCH /api/tasks/{id}/limits`, `POST/PATCH/DELETE /api/tasks/{id}/columns[/{key}]`, `POST /api/tasks/{id}/columns/reorder`, `DELETE /api/tasks/{id}` |
 | **CLI** | `daas task create --prompt … --seed … [--api-source …]`, `daas task list`, `daas task show` |
-| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_metrics_and_spend.py`, `tests/test_spec_editor_and_diff.py` |
-| **Джерела** | `docs/01` модуль 1, `docs/03` §2, `docs/03` §3.7 (`P1-10`) |
-| **Статус** | as-built (P1-10) |
+| **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_open_api_source.py`, `tests/test_prozorro_winners.py`, `tests/test_metrics_and_spend.py`, `tests/test_spec_editor_and_diff.py` |
+| **Джерела** | `docs/01` модуль 1, `docs/03` §2, `docs/03` §3.7 (`P1-10`), `014-prozorro-winners-b2b-triggers` |
+| **Статус** | as-built (`014-prozorro-winners-b2b-triggers`) |
 
 ## 1. Призначення
 Перетворити бізнес-запит природною мовою і 0–20 seed-URL на валідний `TaskSpec`: колонки з типом,
@@ -128,6 +128,15 @@ LLM) і `plan_ready` (`data.spec`).
 - **Сценарій:** GIVEN задача зі списком колонок `[name, city, phone]` WHEN користувач змінює заголовок `phone` на «Гаряча лінія», тип на `phone`, задає ручний селектор `.clinic-card__phone` і переставляє порядок колонок THEN оновлена спека зберігається, новий порядок фіксується, а в журналі з'являються події `column_updated` і `columns_reordered`.
 - **Відмова:** GIVEN синтаксично невалідний CSS-селектор (наприклад `div[[broken`) або дублікат/відсутній ключ під час перестановки WHEN надсилається запит оновлення/перестановки THEN система відхиляє зміну з HTTP `400`/`422` і зрозумілим повідомленням українською без пошкодження збереженої спеки.
 - **Перевірка:** `tests/test_spec_editor_and_diff.py::test_column_update_reorder_and_selector_validation`
+
+### REQ-PLAN-015 — Офлайн-профіль «Prozorro Переможці (B2B Intent)»
+Коли промпт задачі вказує на переможців / постачальників / присудження тендерів Prozorro (або B2B-аудит переможців), планувальник **ПОВИНЕН** формувати спеціалізований `api_json`-план без участі LLM (`limits.max_depth = 0`) із:
+- полями закупівлі й переможця (`tender_id`, `title`, `winner_name`, `winner_edrpou`, `award_amount`, `currency`, `award_status`, `award_date`, `name` як замовник, `cpv`, `region`, `status`, `modified_at`, `url`);
+- колонками збагачення (`website`, `email`, `phone`, `socials`, `tech_stack`), де контакти мають `pii="business_contact"` (без `pii="personal"`);
+- ланцюжком збагачувачів: спершу `domain_resolver` з `name_field="winner_name"`, потім `site_audit`;
+- увімкненим `AutoEnrichTrigger` (поріг суми з промпту або `1 000 000` за замовчуванням, `status_field="award_status"`, `allowed_statuses=["active"]`, `require_fields=["winner_name"]`).
+Наявний базовий профіль Prozorro / Prozorro.Продажі без запиту на переможців **ПОВИНЕН** зберігати попередню поведінку без `auto_enrich`.
+- **Перевірка:** `tests/test_prozorro_winners.py::test_prozorro_winners_preset_and_trigger_config`
 
 ## 4. Інваріанти
 - План завжди валідний `TaskSpec` (≥ 1 колонка, унікальні ключі) — інакше задача не створюється.
