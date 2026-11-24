@@ -156,7 +156,10 @@ URL з обліковими даними.
 блокувати порушення комплаєнсу або брак калібрування (`schedule_blocked`, `level="warning"`) і в
 обох випадках переносити `next_run_at > now` без зациклення; при успішному запуску — оновлювати
 `last_run_at`/`last_run_id`, пересувати `next_run_at > now` і писати `schedule_triggered`.
-- **Перевірка:** `tests/test_scheduler.py::test_scheduler_triggers_skips_active_and_respects_compliance`
+На кожному тіку планувальник також викликає `flush_due_digests(now=current)` для планової
+відправки накопичених підписок `digest_daily` (`REQ-DEL-005`).
+- **Перевірка:** `tests/test_scheduler.py::test_scheduler_triggers_skips_active_and_respects_compliance`,
+  `tests/test_delivery.py::test_digest_daily_queue_scheduler_flush_and_failure_safety`
 
 ### REQ-RUN-042 — Доганяючий прогін після простою (`catch_up`)
 При запізненні більше ніж на 120 секунд: `catch_up=true` виконує **рівно один** доганяючий

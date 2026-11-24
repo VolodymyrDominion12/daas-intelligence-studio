@@ -126,6 +126,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     delivery_timeout_s: float = Field(default=10.0, ge=1.0, le=60.0)
     delivery_max_retries: int = Field(default=3, ge=1, le=10)
+    delivery_inline_limit: int = Field(default=10, ge=1, le=50)
 
     # --- quality & eval (P1-01) -------------------------------------------
     quality_max_drop_ratio: float = Field(default=0.5, ge=0.0, le=1.0)

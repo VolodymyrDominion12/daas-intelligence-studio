@@ -19,7 +19,7 @@ from .compliance import (
 )
 from .config import PROJECT_ROOT, Settings, get_settings, load_runtime_token
 from .db.duckdb_store import AnalyticsStore
-from .db.sqlite_store import ActiveRunError, OperationalStore
+from .db.sqlite_store import _UNSET, ActiveRunError, OperationalStore
 from .discovery import build_search
 from .enrichment.dedupe import VALID_MERGE_POLICIES, find_duplicates, merge_records
 from .enrichment.registry import build_registry, enricher_catalog
@@ -609,20 +609,27 @@ class Studio:
     ) -> SubscriptionInfo:
         self._task(task_id)
         clean_target = self._validate_subscription_target(channel, target)
+        eff_filters = filters or DeliveryFilters()
+        next_digest = (
+            next_cron_after(eff_filters.digest_cron, utcnow())
+            if eff_filters.delivery_mode == "digest_daily"
+            else None
+        )
         sub = self.store.create_subscription(
             task_id,
             name=name.strip(),
             channel=channel,
             target=clean_target,
             secret=secret,
-            filters=filters,
+            filters=eff_filters,
             enabled=enabled,
+            next_digest_at=next_digest,
         )
         self.store.add_event(
             task_id,
             "subscription_created",
             f"Створено підписку доставки ({channel}): {sub.name or sub.id}",
-            data={"subscription_id": sub.id, "channel": channel},
+            data={"subscription_id": sub.id, "channel": channel, "mode": eff_filters.delivery_mode},
         )
         return sub
 
@@ -646,6 +653,18 @@ class Studio:
             if target is not None
             else None
         )
+        next_digest: Any = _UNSET
+        if filters is not None:
+            if filters.delivery_mode == "digest_daily":
+                if (
+                    existing.filters.delivery_mode != "digest_daily"
+                    or existing.filters.digest_cron != filters.digest_cron
+                    or existing.next_digest_at is None
+                ):
+                    next_digest = next_cron_after(filters.digest_cron, utcnow())
+            else:
+                next_digest = None
+
         updated = self.store.update_subscription(
             task_id,
             sub_id,
@@ -654,6 +673,7 @@ class Studio:
             secret=secret,
             filters=filters,
             enabled=enabled,
+            next_digest_at=next_digest,
         )
         if updated is not None:
             self.store.add_event(
@@ -682,6 +702,13 @@ class Studio:
         if sub is None or sub.task_id != task_id:
             raise KeyError(f"subscription not found: {sub_id}")
         return await self.dispatcher.send_test(task, sub)
+
+    async def flush_subscription(self, task_id: str, sub_id: str) -> tuple[bool, int, str]:
+        task = self._task(task_id)
+        sub = self.store.get_subscription(sub_id)
+        if sub is None or sub.task_id != task_id:
+            raise KeyError(f"subscription not found: {sub_id}")
+        return await self.dispatcher.flush_subscription(task, sub)
 
     # ------------------------------------------------------------------
     # quality & gold-set eval (P1-01)

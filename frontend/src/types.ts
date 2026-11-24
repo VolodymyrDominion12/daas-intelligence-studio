@@ -563,13 +563,20 @@ export interface ScheduleInfo {
 }
 
 export type DeliveryChannel = 'webhook' | 'telegram'
+export type DeliveryMode = 'instant' | 'digest_daily'
 
 export interface DeliveryFilters {
   event_types: string[]
   keywords: string[]
+  exclude_keywords: string[]
+  cpv_prefixes: string[]
+  regions: string[]
+  field_filters: Record<string, string[]>
   min_amount: number | null
   max_amount: number | null
   notify_on_error: boolean
+  delivery_mode: DeliveryMode
+  digest_cron: string
 }
 
 export interface SubscriptionView {
@@ -581,6 +588,9 @@ export interface SubscriptionView {
   has_secret: boolean
   filters: DeliveryFilters
   enabled: boolean
+  next_digest_at: string | null
+  last_digest_at: string | null
+  pending_digest_count: number
   created_at: string
   updated_at: string
 }

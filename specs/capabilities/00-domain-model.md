@@ -5,7 +5,7 @@
 | **Код** | `backend/app/models.py`, `backend/app/api/schemas.py`, `backend/app/utils.py` (`record_key_for`, `coerce_value`) |
 | **Тести** | `tests/test_utils.py`, `tests/test_api_flow.py`, `tests/test_open_api_source.py`, `tests/test_scheduler.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_entity_merge.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
 | **Джерела** | `docs/02` §4 (модель даних), ADR-05, ADR-07, `docs/03` §3.2 (`P1-02`), `docs/03` §3.4 (`P1-07`), `docs/03` §3.7 (`P1-10`) |
-| **Статус** | as-built (P1-10) |
+| **Статус** | as-built (`013-delivery-filters-and-digest`) |
 
 ## 1. Сутності
 
@@ -15,7 +15,7 @@
 | Колонка | `FieldSpec` | у `TaskSpec.columns` | Ключ, тип, PII-клас, метод отримання, ручний CSS-селектор |
 | API-джерело | `ApiSourceSpec` | у `TaskSpec.api_source` | Декларативний мапінг JSON API, курсор, пагінація |
 | Розклад | `ScheduleInfo` | SQLite `schedules` | Cron-вираз (UTC), `catch_up`, `next_run_at`, останній запуск |
-| Підписка доставки | `SubscriptionInfo` + `DeliveryFilters` | SQLite `subscriptions` | Канал (`webhook`/`telegram`), ціль, фільтри дельти, алерти власнику |
+| Підписка доставки і дайджест | `SubscriptionInfo` + `DeliveryFilters` | SQLite `subscriptions`, `delivery_digest_queue` | Канал (`webhook`/`telegram`), ціль, фільтри (keywords, стоп-слова, CPV, регіони, поля), режим `instant`/`digest_daily`, черга дайджесту |
 | Якість і gold eval | `QualityChecksReport` + `EvalReport` | `dataset_versions.manifest_json` | Авто-інваріанти після прогону (падіння рядків, обов'язкові поля) і P/R/F1 на gold-set |
 | Запуск | `RunInfo` + `RunStats` | SQLite `runs` | Один прогін `calibrate / collect / enrich / snapshot` |
 | Подія | `EventInfo` | SQLite `events` | Аудит і живий журнал (SSE) |
@@ -137,6 +137,7 @@ Query-параметри в `seeds` зберігаються, коли зада�
 | `eval_completed` | info/warning | `runtime.Studio` | Підсумок офлайн gold-set eval (P/R/F1 без сирих PII-значень) |
 | `subscription_created`, `subscription_updated`, `subscription_deleted` | info | `runtime.Studio` | Керування підписками доставки дельти (`data.subscription_id`) |
 | `delivery_sent`, `delivery_failed` | info/warning | `pipeline/delivery.py` | Результат відправки дельти, алерту чи тесту (`data.subscription_id`, без секретів) |
+| `digest_queued` | info | `pipeline/delivery.py` | Зміни поставлено в чергу щоденного дайджесту (`data.subscription_id`, `data.count`, `data.version`) |
 | `compliance_blocked` | error/warning | `Studio._compliance_gate`, `PolicyGuardFetcher` | Заблоковано політикою (URL редагований) |
 | `compliance_override` | warning | `OperationalStore.create_run` (audit) | Підтверджено запуск по `high`-джерелах |
 | `export_created` | info | `api/data.py` | Створено файл експорту |

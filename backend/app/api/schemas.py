@@ -82,6 +82,9 @@ class SubscriptionView(BaseModel):
     has_secret: bool = False
     filters: DeliveryFilters = Field(default_factory=DeliveryFilters)
     enabled: bool = True
+    next_digest_at: str | None = None
+    last_digest_at: str | None = None
+    pending_digest_count: int = 0
     created_at: str
     updated_at: str
 
@@ -96,6 +99,9 @@ def subscription_view(sub: SubscriptionInfo) -> SubscriptionView:
         has_secret=bool(sub.secret),
         filters=sub.filters,
         enabled=sub.enabled,
+        next_digest_at=sub.next_digest_at.isoformat() if sub.next_digest_at else None,
+        last_digest_at=sub.last_digest_at.isoformat() if sub.last_digest_at else None,
+        pending_digest_count=sub.pending_digest_count,
         created_at=sub.created_at.isoformat(),
         updated_at=sub.updated_at.isoformat(),
     )

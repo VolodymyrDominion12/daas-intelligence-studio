@@ -236,7 +236,7 @@ flowchart TD
 
 | SDD ID | Зміна | Тригер запуску | Оцінка | Бізнес-ефект |
 |:---|:---|:---|:---:|:---|
-| `013` | `delivery-filters-and-digest` (CPV/регіон/стоп-слова/дайджест/XLSX-файл) | Фідбек ≥5 бета-тестерів (Тиждень 2) | S (3 дні) | Зменшує шум → різко підвищує конверсію Free→Pro і retention |
+| `013` | `delivery-filters-and-digest` (CPV/регіон/стоп-слова/дайджест/XLSX-файл) — ✅ [`archive/013`](../specs/changes/archive/013-delivery-filters-and-digest/spec.md) | Фідбек ≥5 бета-тестерів (Тиждень 2) | S (3 дні) | Зменшує шум → різко підвищує конверсію Free→Pro і retention |
 | `014` | `prozorro-winners-b2b-triggers` (awards + авто-`site_audit`) | Підтверджений інтерес ≥3 B2B-лідів | S (2–3 дні) | Відкриває тариф **$69/міс** (у 3.5× вищий чек) |
 | `015` | `telegram-subscriber-bot` (тонкий self-service бот поверх REST API) | ≥10 активних користувачів або перші 3 оплати | M (4–5 днів) | Знімає ручний онбординг, вмикає авто-тріал і авто-оплату |
 | `016` | `global-tenders-adapters` (TED Europa + SAM.gov) | Після $500 MRR або при Pivot | S (3 дні) | Вихід на платоспроможний ринок USD/EUR |

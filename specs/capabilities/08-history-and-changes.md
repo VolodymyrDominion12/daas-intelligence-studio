@@ -2,12 +2,12 @@
 
 | | |
 |:---|:---|
-| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`) |
-| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET /api/tasks/{id}/quarantine`, `POST /api/tasks/{id}/quarantine/{item_id}/approve`, `DELETE /api/tasks/{id}/quarantine/{item_id}`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/eval` |
-| **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|delete`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
+| **Код** | `backend/app/db/duckdb_store.py` (`AnalyticsStore`), `backend/app/pipeline/runner.py` (`snapshot`, `_write_snapshot_and_diff`, `_emit_changes`, `_apply_tombstones`, `rollback_removals`), `backend/app/pipeline/quality.py` (`evaluate_dataset_quality`, `load_gold_set`, `run_gold_eval`), `backend/app/pipeline/delivery.py` (`DeltaDispatcher`, `match_filters`, `change_dedup_key`, `flush_subscription`, `flush_due_digests`), `backend/app/db/sqlite_store.py` (`dataset_versions`, `record_misses`, `subscriptions`, `delivery_log`, `delivery_digest_queue`) |
+| **API** | `GET /api/tasks/{id}/records?q&sort&dir&limit&offset&f_<key>`, `GET /api/tasks/{id}/records/{key}`, `GET /api/tasks/{id}/dataset`, `POST /api/tasks/{id}/snapshot`, `GET /api/tasks/{id}/changes`, `GET /api/tasks/{id}/quarantine`, `POST /api/tasks/{id}/quarantine/{item_id}/approve`, `DELETE /api/tasks/{id}/quarantine/{item_id}`, `GET/POST /api/tasks/{id}/subscriptions`, `PATCH/DELETE /api/tasks/{id}/subscriptions/{sub_id}`, `POST /api/tasks/{id}/subscriptions/{sub_id}/test`, `POST /api/tasks/{id}/subscriptions/{sub_id}/flush`, `POST /api/tasks/{id}/eval` |
+| **CLI** | `daas snapshot <id>`, `daas changes <id>`, `daas notify add\|list\|test\|flush\|delete`, `daas eval --task <id> --gold <path> [--min-f1 ...]` |
 | **Тести** | `tests/test_storage.py`, `tests/test_tombstones.py`, `tests/test_sql_safety.py`, `tests/test_api_flow.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py` |
-| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/03` §3.7 (P1-08), `docs/05` §5 (D-01) |
-| **Статус** | as-built (P1-01 ✅, P1-03 ✅, P1-08 ✅, D-01 ✅) |
+| **Джерела** | ADR-02, ADR-05, `docs/03` §3.1 (P1-01), `docs/03` §3.3 (P1-03), `docs/03` §3.7 (P1-08), `docs/05` §5 (D-01), `013-delivery-filters-and-digest` |
+| **Статус** | as-built (`013-delivery-filters-and-digest`) |
 
 ## 1. Призначення
 Історія, яку конкурент не спарсить заднім числом: append-only версії кожного запису, поточний стан,
@@ -173,6 +173,53 @@ Tombstone **ПОВИНЕН** ставитися лише якщо поточна
 - фіксувати результат подіями `delivery_sent` або `delivery_failed` (`warning`, без токенів/секретів
   у тексті), не зриваючи фіксацію самого збору даних.
 - **Перевірка:** `tests/test_delivery.py::test_delivery_retries_dedup_and_owner_error_alerts`
+
+### REQ-DEL-004 — Розширені детерміновані фільтри підписок (стоп-слова, CPV, регіони, поля)
+Система **ПОВИННА** підтримувати у фільтрах підписки (`API`, `CLI`, `UI` та зворотну сумісність зі
+старими підписками):
+- `exclude_keywords`: список регістронезалежних стоп-слів; якщо будь-яке стоп-слово знайдено в записі чи
+  зміні, подія відхиляється незалежно від позитивних `keywords`;
+- `cpv_prefixes`: список префіксів CPV-коду; якщо непорожній, подія проходить лише коли значення `cpv` /
+  `cpv_code` у записі починається на один із префіксів;
+- `regions`: список регіонів/міст (регістронезалежний підрядковий збіг по полях `region` / `city`); якщо
+  непорожній, подія проходить лише при збігу хоча б із одним елементом;
+- `field_filters`: словник `ключ_поля -> список дозволених значень` (регістронезалежний точний збіг або
+  префіксний збіг за `*` у кінці шаблону); усі непорожні групи фільтрів поєднуються через логічне
+  `AND`, варіанти всередині групи — через `OR`.
+Перевірка фільтрів **НЕ ПОВИННА** бачити сирі значення колонок із `pii="personal"` (вони редагуються до
+фільтрації).
+- **Перевірка:** `tests/test_delivery.py::test_advanced_delivery_filters_cpv_region_exclude_and_fields`
+
+### REQ-DEL-005 — Режим щоденного дайджесту (`digest_daily`), персистентна черга та планова відправка
+Система **ПОВИННА** підтримувати режим доставки підписки `delivery_mode` (`instant` за замовчуванням або
+`digest_daily`) із cron-виразом `digest_cron` (за замовчуванням `0 6 * * *` у UTC):
+- невалідний `digest_cron` при створенні/оновленні підписки **ПОВИНЕН** відхилятися (HTTP 422);
+- для активної `digest_daily`-підписки відфільтровані та ще не доставлені зміни **ПОВИННІ** ставитися в
+  персистентну чергу дайджесту `delivery_digest_queue` без негайної відправки (із подією `digest_queued`),
+  зберігаючись при перезапуску процесу;
+- службові алерти власнику (`notify_on_error=true`) та тестові сповіщення залишаються миттєвими;
+- планувальник за настання планового часу (`next_digest_at <= now`) або ручний виклик
+  `POST /api/tasks/{id}/subscriptions/{sub_id}/flush` / CLI `daas notify flush` **ПОВИННІ** збирати
+  накопичені записи в єдине зведення (`event="digest"` для Webhook, зведене повідомлення для Telegram),
+  фіксувати `delivery_log` і `flushed_at` після успішної відправки, пропускати порожній дайджест без
+  HTTP-запиту і зсувати `next_digest_at` на наступний слот;
+- у разі збою доставки елементи черги дайджесту **НЕ ПОВИННІ** губитися (лишаються доступними для
+  наступної відправки).
+- **Перевірка:** `tests/test_delivery.py::test_digest_daily_queue_scheduler_flush_and_failure_safety`,
+  `tests/test_delivery.py::test_cli_notify_advanced_filters_and_flush`
+
+### REQ-DEL-006 — Читабельне Telegram-форматування та XLSX-вкладення при перевищенні ліміту
+Під час відправки в канал `telegram` (як миттєвої, так і дайджесту) система **ПОВИННА**:
+- формувати безпечно екрановане HTML-повідомлення з типом зміни, назвою, відформатованою сумою/валютою,
+  регіоном/CPV (за наявності), зміною поля (`old → new`, `delta_pct`) і посиланням на джерело;
+- обмежувати інлайн-перелік у текстовому повідомленні величиною `DAAS_DELIVERY_INLINE_LIMIT` (за
+  замовчуванням `10`);
+- якщо кількість змін у пачці перевищує `DAAS_DELIVERY_INLINE_LIMIT`, додатково надсилати через Telegram
+  Bot API `sendDocument` згенерований у пам'яті XLSX-файл з усіма змінами пачки, у якому колонки
+  `pii="personal"` безумовно замасковані (`[redacted]`), а рядкові значення захищені від formula injection
+  (`=`, `+`, `-`, `@`); при збої `sendDocument` після успішного `sendMessage` текст уже доставлених змін
+  фіксується в `delivery_log`, а про помилку вкладення пишеться подія `delivery_failed`.
+- **Перевірка:** `tests/test_delivery.py::test_telegram_formatting_and_xlsx_attachment_over_limit`
 
 ## 8. Вимоги — якість даних та офлайн gold-set eval (`P1-01`)
 

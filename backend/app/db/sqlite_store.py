@@ -293,7 +293,33 @@ MIGRATIONS: list[tuple[int, str]] = [
         FROM calibrations;
         """,
     ),
+    (
+        9,
+        """
+        ALTER TABLE subscriptions ADD COLUMN next_digest_at TEXT;
+        ALTER TABLE subscriptions ADD COLUMN last_digest_at TEXT;
+
+        CREATE TABLE delivery_digest_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+            task_id TEXT NOT NULL,
+            dataset_version INTEGER NOT NULL,
+            run_id TEXT,
+            dedup_key TEXT NOT NULL,
+            change_json TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            flushed_at TEXT,
+            UNIQUE(subscription_id, dedup_key)
+        );
+        CREATE INDEX idx_digest_queue_pending
+            ON delivery_digest_queue(subscription_id, flushed_at, id);
+        """,
+    ),
 ]
+
+
+_UNSET = object()
 
 
 class ActiveRunError(RuntimeError):
@@ -1176,9 +1202,23 @@ class OperationalStore:
             cur = self._conn.execute("DELETE FROM schedules WHERE task_id = ?", (task_id,))
         return cur.rowcount > 0
 
-    # -- subscriptions & delivery log (D-01) -------------------------------
+    # -- subscriptions & delivery log (D-01, 013) --------------------------
     def _to_subscription(self, row: sqlite3.Row) -> SubscriptionInfo:
         filters_raw = json_loads(row["filters_json"], {})
+        row_keys = set(row.keys())
+        next_digest = (
+            datetime.fromisoformat(row["next_digest_at"])
+            if "next_digest_at" in row_keys and row["next_digest_at"]
+            else None
+        )
+        last_digest = (
+            datetime.fromisoformat(row["last_digest_at"])
+            if "last_digest_at" in row_keys and row["last_digest_at"]
+            else None
+        )
+        pending_count = (
+            int(row["pending_digest_count"] or 0) if "pending_digest_count" in row_keys else 0
+        )
         return SubscriptionInfo(
             id=row["id"],
             task_id=row["task_id"],
@@ -1188,19 +1228,32 @@ class OperationalStore:
             secret=row["secret"] or "",
             filters=DeliveryFilters.model_validate(filters_raw),
             enabled=bool(row["enabled"]),
+            next_digest_at=next_digest,
+            last_digest_at=last_digest,
+            pending_digest_count=pending_count,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     def get_subscription(self, sub_id: str) -> SubscriptionInfo | None:
-        row = self._one("SELECT * FROM subscriptions WHERE id = ?", (sub_id,))
+        row = self._one(
+            "SELECT s.*, "
+            "(SELECT COUNT(*) FROM delivery_digest_queue q "
+            " WHERE q.subscription_id = s.id AND q.flushed_at IS NULL) AS pending_digest_count "
+            "FROM subscriptions s WHERE s.id = ?",
+            (sub_id,),
+        )
         return self._to_subscription(row) if row else None
 
     def list_subscriptions(self, task_id: str) -> list[SubscriptionInfo]:
         return [
             self._to_subscription(row)
             for row in self._all(
-                "SELECT * FROM subscriptions WHERE task_id = ? ORDER BY created_at ASC, rowid ASC",
+                "SELECT s.*, "
+                "(SELECT COUNT(*) FROM delivery_digest_queue q "
+                " WHERE q.subscription_id = s.id AND q.flushed_at IS NULL) AS pending_digest_count "
+                "FROM subscriptions s WHERE s.task_id = ? "
+                "ORDER BY s.created_at ASC, s.rowid ASC",
                 (task_id,),
             )
         ]
@@ -1216,14 +1269,17 @@ class OperationalStore:
         filters: DeliveryFilters | None = None,
         enabled: bool = True,
         sub_id: str | None = None,
+        next_digest_at: datetime | None = None,
     ) -> SubscriptionInfo:
         sub_id = sub_id or uuid.uuid4().hex[:12]
         now_str = iso()
         filters_json = (filters or DeliveryFilters()).model_dump_json()
+        next_digest_str = iso(next_digest_at) if next_digest_at is not None else None
         with self._lock:
             self._conn.execute(
                 "INSERT INTO subscriptions(id, task_id, name, channel, target, secret,"
-                " filters_json, enabled, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " filters_json, enabled, next_digest_at, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     sub_id,
                     task_id,
@@ -1233,6 +1289,7 @@ class OperationalStore:
                     secret,
                     filters_json,
                     int(enabled),
+                    next_digest_str,
                     now_str,
                     now_str,
                 ),
@@ -1251,6 +1308,7 @@ class OperationalStore:
         secret: str | None = None,
         filters: DeliveryFilters | None = None,
         enabled: bool | None = None,
+        next_digest_at: Any = _UNSET,
     ) -> SubscriptionInfo | None:
         existing = self._one(
             "SELECT * FROM subscriptions WHERE id = ? AND task_id = ?", (sub_id, task_id)
@@ -1274,8 +1332,11 @@ class OperationalStore:
         if enabled is not None:
             fields.append("enabled = ?")
             values.append(int(enabled))
+        if next_digest_at is not _UNSET:
+            fields.append("next_digest_at = ?")
+            values.append(iso(next_digest_at) if next_digest_at is not None else None)
         if not fields:
-            return self._to_subscription(existing)
+            return self.get_subscription(sub_id)
         fields.append("updated_at = ?")
         values.append(iso())
         values.extend([sub_id, task_id])
@@ -1322,6 +1383,111 @@ class OperationalStore:
                 " attempts = excluded.attempts, error = excluded.error,"
                 " delivered_at = COALESCE(excluded.delivered_at, delivery_log.delivered_at)",
                 (subscription_id, dedup_key, run_id, status, attempts, error, now_str, delivered_str),
+            )
+
+    def enqueue_digest_items(
+        self,
+        subscription_id: str,
+        task_id: str,
+        dataset_version: int,
+        run_id: str | None,
+        *,
+        items: list[tuple[str, dict[str, Any], dict[str, Any]]],
+    ) -> int:
+        if not items:
+            return 0
+        now_str = iso()
+        added = 0
+        with self._lock:
+            for dedup_key, change_dict, record_dict in items:
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO delivery_digest_queue("
+                    "subscription_id, task_id, dataset_version, run_id, dedup_key,"
+                    " change_json, record_json, created_at"
+                    ") VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        subscription_id,
+                        task_id,
+                        dataset_version,
+                        run_id,
+                        dedup_key,
+                        json_dumps(change_dict),
+                        json_dumps(record_dict),
+                        now_str,
+                    ),
+                )
+                added += cur.rowcount
+        return added
+
+    def list_pending_digest(self, subscription_id: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT id, subscription_id, task_id, dataset_version, run_id, dedup_key,"
+            " change_json, record_json, created_at "
+            "FROM delivery_digest_queue "
+            "WHERE subscription_id = ? AND flushed_at IS NULL "
+            "ORDER BY id ASC",
+            (subscription_id,),
+        )
+        return [
+            {
+                "id": int(row["id"]),
+                "subscription_id": str(row["subscription_id"]),
+                "task_id": str(row["task_id"]),
+                "dataset_version": int(row["dataset_version"]),
+                "run_id": row["run_id"],
+                "dedup_key": str(row["dedup_key"]),
+                "change": json_loads(row["change_json"], {}),
+                "record": json_loads(row["record_json"], {}),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def mark_digest_flushed(self, subscription_id: str, queue_ids: list[int]) -> None:
+        if not queue_ids:
+            return
+        now_str = iso()
+        with self._lock:
+            for start in range(0, len(queue_ids), 200):
+                batch = queue_ids[start : start + 200]
+                placeholders = ",".join("?" for _ in batch)
+                self._conn.execute(
+                    f"UPDATE delivery_digest_queue SET flushed_at = ? "
+                    f"WHERE subscription_id = ? AND flushed_at IS NULL AND id IN ({placeholders})",
+                    [now_str, subscription_id, *batch],
+                )
+
+    def list_due_digest_subscriptions(self, now_iso: str) -> list[SubscriptionInfo]:
+        rows = self._all(
+            "SELECT s.*, "
+            "(SELECT COUNT(*) FROM delivery_digest_queue q "
+            " WHERE q.subscription_id = s.id AND q.flushed_at IS NULL) AS pending_digest_count "
+            "FROM subscriptions s "
+            "WHERE s.enabled = 1 AND s.next_digest_at IS NOT NULL AND s.next_digest_at <= ? "
+            "ORDER BY s.next_digest_at ASC",
+            (now_iso,),
+        )
+        due = [self._to_subscription(row) for row in rows]
+        return [sub for sub in due if sub.filters.delivery_mode == "digest_daily"]
+
+    def advance_subscription_digest(
+        self,
+        subscription_id: str,
+        *,
+        next_digest_at: datetime | None,
+        last_digest_at: datetime | None = None,
+    ) -> None:
+        now_str = iso()
+        fields = ["next_digest_at = ?", "updated_at = ?"]
+        values: list[Any] = [iso(next_digest_at) if next_digest_at is not None else None, now_str]
+        if last_digest_at is not None:
+            fields.append("last_digest_at = ?")
+            values.append(iso(last_digest_at))
+        values.append(subscription_id)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE subscriptions SET {', '.join(fields)} WHERE id = ?",
+                values,
             )
 
     # -- entity resolution links (P1-02) ----------------------------------

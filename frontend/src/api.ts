@@ -202,6 +202,11 @@ export const api = {
     request<{ ok: boolean; detail: string }>(`/tasks/${id}/subscriptions/${subId}/test`, {
       method: 'POST',
     }),
+  flushSubscription: (id: string, subId: string) =>
+    request<{ ok: boolean; count: number; detail: string }>(
+      `/tasks/${id}/subscriptions/${subId}/flush`,
+      { method: 'POST' },
+    ),
   evalTask: (
     id: string,
     payload: { cases?: GoldCaseInput[]; gold_preset?: string; min_f1?: number },

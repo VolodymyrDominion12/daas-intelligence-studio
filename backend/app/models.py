@@ -518,16 +518,70 @@ class ScheduleInfo(BaseModel):
 
 
 DeliveryChannel = Literal["webhook", "telegram"]
+DeliveryMode = Literal["instant", "digest_daily"]
 
 
 class DeliveryFilters(BaseModel):
-    """Deterministic filter criteria for outbound delta notifications."""
+    """Deterministic filter criteria and delivery cadence for outbound delta notifications."""
 
     event_types: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    exclude_keywords: list[str] = Field(default_factory=list)
+    cpv_prefixes: list[str] = Field(default_factory=list)
+    regions: list[str] = Field(default_factory=list)
+    field_filters: dict[str, list[str]] = Field(default_factory=dict)
     min_amount: float | None = None
     max_amount: float | None = None
     notify_on_error: bool = False
+    delivery_mode: DeliveryMode = "instant"
+    digest_cron: str = "0 6 * * *"
+
+    @field_validator(
+        "event_types",
+        "keywords",
+        "exclude_keywords",
+        "cpv_prefixes",
+        "regions",
+        mode="before",
+    )
+    @classmethod
+    def _clean_string_list(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        cleaned: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in cleaned:
+                cleaned.append(text)
+        return cleaned
+
+    @field_validator("field_filters", mode="before")
+    @classmethod
+    def _clean_field_filters(cls, value: Any) -> dict[str, list[str]]:
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("field_filters має бути словником key -> list[str]")
+        cleaned: dict[str, list[str]] = {}
+        for raw_key, raw_vals in value.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            vals_iter = [raw_vals] if isinstance(raw_vals, str) else list(raw_vals or [])
+            vals = [str(v or "").strip() for v in vals_iter if str(v or "").strip()]
+            if vals:
+                cleaned[key] = vals
+        return cleaned
+
+    @field_validator("digest_cron", mode="before")
+    @classmethod
+    def _validate_digest_cron(cls, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "0 6 * * *"
+        from .pipeline.scheduler import validate_cron
+
+        return validate_cron(text)
 
 
 class SubscriptionInfo(BaseModel):
@@ -541,6 +595,9 @@ class SubscriptionInfo(BaseModel):
     secret: str = ""
     filters: DeliveryFilters = Field(default_factory=DeliveryFilters)
     enabled: bool = True
+    next_digest_at: datetime | None = None
+    last_digest_at: datetime | None = None
+    pending_digest_count: int = 0
     created_at: datetime
     updated_at: datetime
 

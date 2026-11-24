@@ -399,4 +399,7 @@ class TaskScheduler:
                     "catch_up": is_catch_up,
                 }
             )
+        dispatcher = getattr(self.studio, "dispatcher", None)
+        if dispatcher is not None:
+            await dispatcher.flush_due_digests(now=current)
         return outcomes

@@ -5,7 +5,7 @@
 | **Код** | `backend/app/main.py` (`create_app`, guard-middleware, обробники помилок, SPA), `backend/app/api/tasks.py`, `backend/app/api/data.py`, `backend/app/api/schemas.py`, `backend/app/api/deps.py`, `backend/app/config.py` (`load_runtime_token`) |
 | **Тести** | `tests/test_api_flow.py`, `tests/test_compliance.py`, `tests/test_delivery.py`, `tests/test_quality.py`, `tests/test_quarantine.py`, `tests/test_deploy_ops.py`, `tests/test_metrics_and_spend.py`, `tests/test_entity_merge.py`, `tests/test_proxy_resilience.py`, `tests/test_js_sidecar.py`, `tests/test_spec_editor_and_diff.py` |
 | **Джерела** | ADR-08, ADR-10 |
-| **Статус** | as-built (P1-10) |
+| **Статус** | as-built (`013-delivery-filters-and-digest`) |
 
 ## 1. Призначення
 Єдиний процес: FastAPI віддає API під `/api/*` і зібраний SPA. API локальний, але захищений від
@@ -33,9 +33,10 @@ CSRF/DNS-rebinding, бо будь-яка сторінка в браузері м
 | POST | `/api/runs/{id}/cancel` | скасування | 04 |
 | GET | `/api/schedules` | список налаштованих розкладів | 04 |
 | GET/PUT/DELETE | `/api/tasks/{id}/schedule` | перегляд / збереження / видалення cron-розкладу (`ScheduleRequest`) | 04 |
-| GET/POST | `/api/tasks/{id}/subscriptions` | список / створення підписок доставки (`SubscriptionView`, без `secret`) | 08 |
+| GET/POST | `/api/tasks/{id}/subscriptions` | список / створення підписок доставки (`SubscriptionView`: фільтри, дайджест `next_digest_at`/`last_digest_at`/`pending_digest_count`, без `secret`) | 08 |
 | PATCH/DELETE | `/api/tasks/{id}/subscriptions/{sub_id}` | оновлення / видалення підписки доставки | 08 |
 | POST | `/api/tasks/{id}/subscriptions/{sub_id}/test` | тестове сповіщення у вибраний канал | 08 |
+| POST | `/api/tasks/{id}/subscriptions/{sub_id}/flush` | ручне відправлення накопиченої черги дайджесту | 08 |
 | POST | `/api/tasks/{id}/eval` | офлайн оцінка витягування на gold-set (`EvalRequest` → `EvalReport`) | 08 |
 | GET | `/api/tasks/{id}/events`, `/events/stream`, `/changes` | журнал, SSE, зміни | 04, 08 |
 | GET | `/api/tasks/{id}/dataset`, `/records`, `/records/{key}` | датасет, записи, історія запису | 08 |

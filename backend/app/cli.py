@@ -15,7 +15,7 @@ from .compliance import ComplianceError, source_note
 from .config import Settings, get_settings
 from .db.duckdb_store import AnalyticsStore
 from .db.sqlite_store import OperationalStore
-from .models import DeliveryChannel, DeliveryFilters, MergePolicy
+from .models import DeliveryChannel, DeliveryFilters, DeliveryMode, MergePolicy
 from .pipeline.quality import load_gold_set
 from .runtime import MergeConflictError, RunConflict, Studio
 from .storage.exports import export_dataset
@@ -301,6 +301,28 @@ def schedule_delete(task_id: str) -> None:
         asyncio.run(studio.aclose())
 
 
+def _parse_field_filters(raw_fields: list[str] | None) -> dict[str, list[str]]:
+    parsed: dict[str, list[str]] = {}
+    for entry in raw_fields or []:
+        text = entry.strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(f"Невірний формат --field '{entry}': очікується key=val1|val2")
+        key, raw_vals = text.split("=", 1)
+        clean_key = key.strip()
+        if not clean_key:
+            raise ValueError(f"Порожній ключ у --field '{entry}'")
+        vals = [v.strip() for v in raw_vals.split("|") if v.strip()]
+        if not vals:
+            raise ValueError(f"Порожнє значення у --field '{entry}'")
+        existing = parsed.setdefault(clean_key, [])
+        for val in vals:
+            if val not in existing:
+                existing.append(val)
+    return parsed
+
+
 @notify_app.command("add")
 def notify_add(
     task_id: str,
@@ -314,11 +336,30 @@ def notify_add(
     keyword: Annotated[
         list[str] | None, typer.Option("--keyword", help="Ключове слово (можна кілька)")
     ] = None,
+    exclude: Annotated[
+        list[str] | None, typer.Option("--exclude", help="Стоп-слово для виключення (можна кілька)")
+    ] = None,
+    cpv: Annotated[
+        list[str] | None, typer.Option("--cpv", help="Префікс CPV-коду (можна кілька)")
+    ] = None,
+    region: Annotated[
+        list[str] | None, typer.Option("--region", help="Регіон або місто (можна кілька)")
+    ] = None,
+    field: Annotated[
+        list[str] | None,
+        typer.Option("--field", help="Фільтр поля key=val1|val2 (можна кілька)"),
+    ] = None,
     min_amount: Annotated[float | None, typer.Option("--min-amount", help="Мінімальна сума")] = None,
     max_amount: Annotated[float | None, typer.Option("--max-amount", help="Максимальна сума")] = None,
     notify_errors: Annotated[
         bool, typer.Option("--notify-errors/--no-notify-errors", help="Алерти про збої й 0 записів")
     ] = False,
+    mode: Annotated[
+        DeliveryMode, typer.Option("--mode", help="instant | digest_daily")
+    ] = "instant",
+    digest_cron: Annotated[
+        str, typer.Option("--digest-cron", help="UTC cron для digest_daily")
+    ] = "0 6 * * *",
     enabled: Annotated[bool, typer.Option("--enabled/--disabled")] = True,
 ) -> None:
     """Додати підписку доставки дельти або алертів."""
@@ -328,9 +369,15 @@ def notify_add(
             filters = DeliveryFilters(
                 event_types=list(event or []),
                 keywords=list(keyword or []),
+                exclude_keywords=list(exclude or []),
+                cpv_prefixes=list(cpv or []),
+                regions=list(region or []),
+                field_filters=_parse_field_filters(field),
                 min_amount=min_amount,
                 max_amount=max_amount,
                 notify_on_error=notify_errors,
+                delivery_mode=mode,
+                digest_cron=digest_cron,
             )
             sub = studio.create_subscription(
                 task_id,
@@ -346,7 +393,7 @@ def notify_add(
             raise typer.Exit(code=1) from exc
         typer.echo(
             f"subscription {sub.id} | channel={sub.channel} | target={sub.target} | "
-            f"enabled={sub.enabled}"
+            f"mode={sub.filters.delivery_mode} | enabled={sub.enabled}"
         )
     finally:
         asyncio.run(studio.aclose())
@@ -367,7 +414,14 @@ def notify_list(task_id: str) -> None:
             return
         for sub in subs:
             state = "on" if sub.enabled else "off"
-            typer.echo(f"{sub.id}  {state:<3}  {sub.channel:<8}  {sub.target}  {sub.name}")
+            digest_info = (
+                f"digest({sub.filters.digest_cron}, черга={sub.pending_digest_count})"
+                if sub.filters.delivery_mode == "digest_daily"
+                else "instant"
+            )
+            typer.echo(
+                f"{sub.id}  {state:<3}  {sub.channel:<8}  {digest_info:<28}  {sub.target}  {sub.name}"
+            )
     finally:
         asyncio.run(studio.aclose())
 
@@ -381,6 +435,27 @@ def notify_test(task_id: str, sub_id: str) -> None:
             ok, detail = await studio.test_subscription(task_id, sub_id)
             if ok:
                 typer.echo(f"✅ {detail}")
+            else:
+                typer.echo(f"❌ {detail}", err=True)
+                raise typer.Exit(code=1)
+        except KeyError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        finally:
+            await studio.aclose()
+
+    asyncio.run(run())
+
+
+@notify_app.command("flush")
+def notify_flush(task_id: str, sub_id: str) -> None:
+    """Примусово відправити накопичений дайджест по підписці."""
+    async def run() -> None:
+        studio = _studio()
+        try:
+            ok, count, detail = await studio.flush_subscription(task_id, sub_id)
+            if ok:
+                typer.echo(f"✅ {detail} (count={count})")
             else:
                 typer.echo(f"❌ {detail}", err=True)
                 raise typer.Exit(code=1)

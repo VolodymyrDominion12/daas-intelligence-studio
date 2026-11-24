@@ -3,6 +3,7 @@ import { ApiError, api, type RiskAck } from '../api'
 import { fmtDateTime, fmtNumber, statusClass } from '../format'
 import type {
   DeliveryChannel,
+  DeliveryMode,
   EvalReport,
   QualityChecksReport,
   ScheduleInfo,
@@ -27,12 +28,46 @@ const CRON_PRESETS: { label: string; cron: string }[] = [
   { label: 'Щотижня (Пн 06:00)', cron: '0 6 * * 1' },
 ]
 
+const DIGEST_CRON_PRESETS: { label: string; cron: string }[] = [
+  { label: '06:00 UTC (09:00 Київ)', cron: '0 6 * * *' },
+  { label: '15:00 UTC (18:00 Київ)', cron: '0 15 * * *' },
+  { label: 'Будні 06:00 UTC', cron: '0 6 * * 1-5' },
+]
+
 const EVENT_TYPE_OPTIONS: { key: string; label: string }[] = [
   { key: 'new_entity', label: 'Нові записи' },
   { key: 'price_drop', label: 'Зниження ціни' },
   { key: 'field_changed', label: 'Зміна полів' },
   { key: 'removed_entity', label: 'Зниклі записи' },
 ]
+
+function splitCsv(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function parseFieldFiltersInput(raw: string): Record<string, string[]> {
+  const result: Record<string, string[]> = {}
+  for (const part of splitCsv(raw)) {
+    const eqIndex = part.indexOf('=')
+    if (eqIndex <= 0) {
+      throw new Error(`Невірний формат фільтра поля «${part}»: очікується ключ=значення1|значення2`)
+    }
+    const key = part.slice(0, eqIndex).trim()
+    const values = part
+      .slice(eqIndex + 1)
+      .split('|')
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (!key || values.length === 0) {
+      throw new Error(`Порожнє значення у фільтрі поля «${part}»`)
+    }
+    result[key] = [...(result[key] ?? []), ...values]
+  }
+  return result
+}
 
 export function AutomationPanel({
   task,
@@ -60,8 +95,14 @@ export function AutomationPanel({
   const [subSecret, setSubSecret] = useState('')
   const [subEventTypes, setSubEventTypes] = useState<string[]>(['new_entity', 'price_drop'])
   const [subKeywords, setSubKeywords] = useState('')
+  const [subExcludeKeywords, setSubExcludeKeywords] = useState('')
+  const [subCpvPrefixes, setSubCpvPrefixes] = useState('')
+  const [subRegions, setSubRegions] = useState('')
+  const [subFieldFilters, setSubFieldFilters] = useState('')
   const [subMinAmount, setSubMinAmount] = useState('')
   const [subMaxAmount, setSubMaxAmount] = useState('')
+  const [subDeliveryMode, setSubDeliveryMode] = useState<DeliveryMode>('instant')
+  const [subDigestCron, setSubDigestCron] = useState('0 6 * * *')
   const [subNotifyError, setSubNotifyError] = useState(true)
   const [subEnabled, setSubEnabled] = useState(true)
   const [creatingSub, setCreatingSub] = useState(false)
@@ -182,10 +223,21 @@ export function AutomationPanel({
       onToast({ kind: 'error', text: 'Мінімальна сума не може перевищувати максимальну' })
       return
     }
-    const keywords = subKeywords
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
+    let parsedFieldFilters: Record<string, string[]> = {}
+    try {
+      parsedFieldFilters = parseFieldFiltersInput(subFieldFilters)
+    } catch (error) {
+      onToast({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Невірний формат фільтрів полів',
+      })
+      return
+    }
+
+    const keywords = splitCsv(subKeywords)
+    const excludeKeywords = splitCsv(subExcludeKeywords)
+    const cpvPrefixes = splitCsv(subCpvPrefixes)
+    const regions = splitCsv(subRegions)
 
     setCreatingSub(true)
     try {
@@ -197,9 +249,15 @@ export function AutomationPanel({
         filters: {
           event_types: subEventTypes,
           keywords,
+          exclude_keywords: excludeKeywords,
+          cpv_prefixes: cpvPrefixes,
+          regions,
+          field_filters: parsedFieldFilters,
           min_amount: minVal,
           max_amount: maxVal,
           notify_on_error: subNotifyError,
+          delivery_mode: subDeliveryMode,
+          digest_cron: subDigestCron.trim() || '0 6 * * *',
         },
         enabled: subEnabled,
       })
@@ -208,6 +266,10 @@ export function AutomationPanel({
       setSubTarget('')
       setSubSecret('')
       setSubKeywords('')
+      setSubExcludeKeywords('')
+      setSubCpvPrefixes('')
+      setSubRegions('')
+      setSubFieldFilters('')
       setSubMinAmount('')
       setSubMaxAmount('')
       onToast({ kind: 'success', text: 'Підписку доставки створено' })
@@ -249,6 +311,26 @@ export function AutomationPanel({
       })
     } catch (error) {
       onToast({ kind: 'error', text: error instanceof Error ? error.message : 'Помилка тесту' })
+    } finally {
+      setBusySubId(null)
+    }
+  }
+
+  const flushSub = async (sub: SubscriptionView) => {
+    setBusySubId(sub.id)
+    try {
+      const res = await api.flushSubscription(task.id, sub.id)
+      const subsRes = await api.subscriptions(task.id)
+      setSubscriptions(subsRes.items)
+      onToast({
+        kind: res.ok ? 'success' : 'error',
+        text: res.ok ? res.detail : `Не вдалося відправити дайджест: ${res.detail}`,
+      })
+    } catch (error) {
+      onToast({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Помилка відправки дайджесту',
+      })
     } finally {
       setBusySubId(null)
     }
@@ -447,11 +529,20 @@ export function AutomationPanel({
           <div className="stack">
             {subscriptions.map((sub) => {
               const rowBusy = busySubId === sub.id
+              const isDigest = sub.filters.delivery_mode === 'digest_daily'
               return (
                 <div key={sub.id} className="source-row">
                   <div className="source-head">
                     <div className="card-actions">
                       <span className="chip">{sub.channel}</span>
+                      <span className="chip">
+                        {isDigest ? `Дайджест · ${sub.filters.digest_cron}` : 'Миттєво'}
+                      </span>
+                      {sub.pending_digest_count > 0 && (
+                        <span className="chip chip--warn">
+                          У черзі: {sub.pending_digest_count}
+                        </span>
+                      )}
                       <strong>{sub.name || sub.target}</strong>
                     </div>
                     <div className="card-actions">
@@ -462,6 +553,13 @@ export function AutomationPanel({
                     </div>
                   </div>
                   <div className="mono-small">{sub.target}</div>
+                  {(isDigest || sub.last_digest_at) && (
+                    <div className="mono-small">
+                      {sub.next_digest_at && <>Наступний: {fmtDateTime(sub.next_digest_at)}</>}
+                      {sub.next_digest_at && sub.last_digest_at && ' · '}
+                      {sub.last_digest_at && <>Останній: {fmtDateTime(sub.last_digest_at)}</>}
+                    </div>
+                  )}
                   <div className="enrich-fields">
                     {sub.filters.event_types.length > 0 ? (
                       sub.filters.event_types.map((ev) => (
@@ -473,8 +571,28 @@ export function AutomationPanel({
                       <span className="chip">усі зміни</span>
                     )}
                     {sub.filters.keywords.map((kw) => (
-                      <span key={kw} className="chip chip--yes">
+                      <span key={`kw-${kw}`} className="chip chip--yes">
                         #{kw}
+                      </span>
+                    ))}
+                    {sub.filters.exclude_keywords.map((kw) => (
+                      <span key={`ex-${kw}`} className="chip chip--warn">
+                        без: {kw}
+                      </span>
+                    ))}
+                    {sub.filters.cpv_prefixes.map((cpv) => (
+                      <span key={`cpv-${cpv}`} className="chip">
+                        CPV {cpv}*
+                      </span>
+                    ))}
+                    {sub.filters.regions.map((reg) => (
+                      <span key={`reg-${reg}`} className="chip">
+                        📍 {reg}
+                      </span>
+                    ))}
+                    {Object.entries(sub.filters.field_filters).map(([fkey, fvals]) => (
+                      <span key={`fld-${fkey}`} className="chip">
+                        {fkey}={fvals.join('|')}
                       </span>
                     ))}
                     {sub.filters.min_amount !== null && (
@@ -495,6 +613,15 @@ export function AutomationPanel({
                     >
                       {sub.enabled ? 'Призупинити' : 'Увімкнути'}
                     </button>
+                    {sub.pending_digest_count > 0 && (
+                      <button
+                        className="btn btn--tiny btn--primary"
+                        onClick={() => void flushSub(sub)}
+                        disabled={rowBusy}
+                      >
+                        Надіслати зараз ({sub.pending_digest_count})
+                      </button>
+                    )}
                     <button
                       className="btn btn--tiny"
                       onClick={() => void testSub(sub)}
@@ -532,6 +659,17 @@ export function AutomationPanel({
                 <option value="webhook">Webhook</option>
               </select>
             </label>
+            <label className="field field--small">
+              <span className="field-label">Режим</span>
+              <select
+                className="select"
+                value={subDeliveryMode}
+                onChange={(event) => setSubDeliveryMode(event.target.value as DeliveryMode)}
+              >
+                <option value="instant">Миттєво</option>
+                <option value="digest_daily">Щоденний дайджест</option>
+              </select>
+            </label>
             <label className="field">
               <span className="field-label">Назва (опційно)</span>
               <input
@@ -557,6 +695,33 @@ export function AutomationPanel({
               />
             </label>
           </div>
+
+          {subDeliveryMode === 'digest_daily' && (
+            <div className="field">
+              <span className="field-label">
+                Розклад дайджесту (UTC cron)
+                <span className="hint">накопичує зміни в чергу й надсилає одним пакетом</span>
+              </span>
+              <div className="examples">
+                {DIGEST_CRON_PRESETS.map((preset) => (
+                  <button
+                    key={preset.cron}
+                    type="button"
+                    className={`tiny-btn ${subDigestCron.trim() === preset.cron ? 'tiny-btn--active' : ''}`}
+                    onClick={() => setSubDigestCron(preset.cron)}
+                  >
+                    {preset.label} · <code>{preset.cron}</code>
+                  </button>
+                ))}
+              </div>
+              <input
+                className="input input--mono"
+                value={subDigestCron}
+                onChange={(event) => setSubDigestCron(event.target.value)}
+                placeholder="0 6 * * *"
+              />
+            </div>
+          )}
 
           {subChannel === 'webhook' && (
             <label className="field">
@@ -598,7 +763,16 @@ export function AutomationPanel({
                 className="input"
                 value={subKeywords}
                 onChange={(event) => setSubKeywords(event.target.value)}
-                placeholder="оренда, Київ, 45000000"
+                placeholder="оренда, ремонт"
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Стоп-слова (виключити)</span>
+              <input
+                className="input"
+                value={subExcludeKeywords}
+                onChange={(event) => setSubExcludeKeywords(event.target.value)}
+                placeholder="субвенція, ліфт"
               />
             </label>
             <label className="field field--small">
@@ -619,6 +793,36 @@ export function AutomationPanel({
                 value={subMaxAmount}
                 onChange={(event) => setSubMaxAmount(event.target.value)}
                 placeholder="5000000"
+              />
+            </label>
+          </div>
+
+          <div className="form-row">
+            <label className="field">
+              <span className="field-label">CPV-префікси (через кому)</span>
+              <input
+                className="input input--mono"
+                value={subCpvPrefixes}
+                onChange={(event) => setSubCpvPrefixes(event.target.value)}
+                placeholder="45, 3019, 3310"
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Регіони / міста (через кому)</span>
+              <input
+                className="input"
+                value={subRegions}
+                onChange={(event) => setSubRegions(event.target.value)}
+                placeholder="Київ, Львів"
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Фільтри полів (key=val1|val2)</span>
+              <input
+                className="input input--mono"
+                value={subFieldFilters}
+                onChange={(event) => setSubFieldFilters(event.target.value)}
+                placeholder="status=active*, currency=UAH"
               />
             </label>
           </div>

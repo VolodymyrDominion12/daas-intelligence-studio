@@ -371,6 +371,16 @@ async def test_subscription(task_id: str, sub_id: str, studio: StudioDep) -> dic
     return {"ok": ok, "detail": detail}
 
 
+@router.post("/tasks/{task_id}/subscriptions/{sub_id}/flush")
+async def flush_subscription(task_id: str, sub_id: str, studio: StudioDep) -> dict[str, Any]:
+    _task_or_404(studio, task_id)
+    try:
+        ok, count, detail = await studio.flush_subscription(task_id, sub_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Підписку не знайдено") from exc
+    return {"ok": ok, "count": count, "detail": detail}
+
+
 @router.post("/tasks/{task_id}/eval")
 async def evaluate_task_endpoint(
     task_id: str, payload: EvalRequest, studio: StudioDep
